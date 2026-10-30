@@ -1,8 +1,9 @@
 # Large-Lunch-Model：澳洲、美国、中国交付实践与团队组织对比
 
-- 版本：v0.1，供选择与讨论。
+- 版本：v0.2，供选择与讨论；技术与预算边界于 2026-10-29 同步。
 - 编写与来源核对日期：2026-10-27（Australia/Sydney）。
-- 项目基线：[tech-stack-requirements.md](../tech-stack-requirements.md)。
+- 项目基线：[tech-stack-requirements.md](../tech-stack-requirements.md)；专题要求：[数据](data-requirements.md)、[AWS](aws-requirements.md)、[本地开发](local-development.md)。
+- 用户已确认的预算口径：`MENU_SUBTOTAL`，包含所选规格、必选与已选可选加料和数量；配送费与平台 service fee 等订单级费用另列。本文中的费用与版本语义按技术基线执行。
 - 状态：本文是 operating model 建议，尚未选定团队组织、人员、Sprint 长度或上线日期；不代表 CI/CD 或产品功能已经实现。
 - 排期假设：以 6–8 人、可持续的接近全职投入为主要讨论场景。实际人数、经验、每周投入、AWS 资源和数据来源均待确认；兼职团队应按实际 capacity 缩小每轮范围。
 - 阅读顺序：先看第 1、3、4、13 节选择模式，再看第 5–12 节了解执行细节。
@@ -43,7 +44,9 @@
 
 walking skeleton 指一条很薄但贯穿系统的可运行路径。对本项目，可以是：
 
-**用户输入预算 → Java 查询已审核菜品 → Python 调用一个模型 → Java 校验返回 ID 和约束 → 页面展示有来源的推荐。**
+**用户输入菜品小计预算 → Java 查询已发布且有效的 OfferVersions → Python 调用一个模型 → Java 校验候选、菜品事实版本、价格版本和约束 → 页面展示有来源的推荐。**
+
+先使用 synthetic fixtures 和 mock provider 验证本地流程；真实菜单、一个真实 provider 与受限 staging 分别通过验证后，才能报告对应成果。初始创建来源、门店、证据、batch、审核与发布的流程从第一轮就存在，可以通过 CLI 完成。
 
 它同时验证服务连接、数据契约、错误处理和 deployment。只有空目录、三个 hello-world 服务或一张 architecture diagram，还不能证明这一条用户流程可行。
 
@@ -229,12 +232,12 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 ### 6.2 一条 Story 如何跨专业协作
 
-示例：**用户输入每人 AUD 25 的预算，希望看到来自真实菜单的可选菜品及推荐理由。**
+示例：**一位用户输入本次菜品小计 AUD 25 的预算，希望看到来自真实菜单的可选菜品及推荐理由。** 首轮单人、单店、单渠道，不包含配送费与 service fee。多人方案的总预算和份量规则留到该功能启用时定义。
 
 | 工作 | 主要 owner | 前置约定 | 可并行的部分 |
 | --- | --- | --- | --- |
-| 确认预算口径与交互 | Product / UX | 人数、单人还是总预算、附加费处理方式 | 页面草图、测试场景 |
-| 提供审核后的菜品 fixture | Data | MenuItem schema、source ID、价格与版本 | 人工数据准备与 backend 开发 |
+| 落实已确认预算口径与交互 | Product / UX | MENU_SUBTOTAL、规格 / options、quantity、排除费用的展示 | 页面草图、测试场景 |
+| 提供审核后的菜品 fixture | Data | MenuItemRevision、OfferVersion、SourceRecord、snapshot、freshness | 人工数据准备与 backend 开发 |
 | 查询候选与最终规则校验 | Backend | budget contract、错误码、数据版本 | 用 fixture 完成 API 和测试 |
 | 生成解释与引用 | AI | 候选输入、structured output、provider capability | 先以 mock provider 验证 schema |
 | 展示输入与 streaming | Frontend | OpenAPI、SSE event、状态机 | 先对 mock API 开发 |
@@ -256,7 +259,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 1. 确定首个用户场景，例如悉尼 CBD 附近的单人工作日午餐；明确预算、数据覆盖与推荐边界。
 2. 明确成员、每周可用时间、专业 owner 和 backup，先确认 capacity 再承诺范围。
 3. 明确能合法使用的数据来源及更新方式，准备少量有来源的样本；首轮可手工整理。
-4. 约定最小数据与 API contract：MenuItem、source、menu version、recommendation request/result、SSE events。
+4. 按数据要求落实最小 contract：MenuItemRevision、OfferVersion、SourceRecord、MenuSnapshot、MENU_SUBTOTAL、ingestion / review / publish、recommendation request/result 与 SSE events。
 5. 确认一个 provider 的接入条件、AWS staging 的账号与权限、费用范围，以及负责者。
 6. 建立一个 backlog、轻量 PR review 约定和初版 Definition of Done。
 
@@ -270,11 +273,12 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 首轮范围建议：
 
-- 小规模、人工审核的 seed data；例如 5–10 家门店、30–50 个 MenuItems，仅作为规划量级，不代表已经收集。
+- 小规模、人工审核的真实 seed data；例如 5–10 家门店、30–50 个 MenuItems，仅作为规划量级，不代表已经收集。每个候选有有效且已发布的 OfferVersion；synthetic fixtures 只用于开发与明确标识的演示。
 - 一条核心选餐路径、一个 provider、一个 Persona、一个 Skill。
 - 最小 streaming、客户端取消及下游尽力取消，以及无候选、provider timeout、输出无效三类失败行为；不承诺断线自动续传。
 - Java → Python 的内部身份边界、受限的 staging 访问；完整账号资料与收藏功能可在后续扩展。
-- 保留输入、来源、实际 model ID 与请求状态的最小记录。
+- 保留输入预算、SourceRecord、MenuItemRevision / MenuSnapshot / OfferVersion、实际 model ID 与请求状态的最小记录。
+- 首轮以 Admin CLI 完成来源与门店 bootstrap、导入、审核和发布；资料过期在查询时排除，不等待自动 scheduler。
 - CI、Flyway 初始 migration 与 seed 导入验证，以及一条可重复执行的 staging deployment 路径。
 
 多模型比较、完整管理后台、自动 OCR、大规模抓取、LangGraph 复杂协作、Live2D / 3D 不属于这个 Sprint 的必要目标。它们仍可保留在产品 backlog。
@@ -314,7 +318,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 | Sprint | 目标 | 可选的主要增量 | CI/CD 与质量演进 |
 | --- | --- | --- | --- |
 | 1 | 证明最小选餐路径可运行 | seed data、单 provider、单 Persona / Skill、staging | 各服务 CI、初始 migration / seed、contract、关键 E2E、自动 staging |
-| 2 | 提高数据与推荐可信度 | 菜单审核 / 更新的最小流程；偏好保存或收藏二选一优先；补充来源与未知信息处理 | migration 升级兼容性验证、规则回归、evaluation dataset v1 |
+| 2 | 提高数据与推荐可信度 | 改善首轮已有的审核 / 更新流程和必要 UI；偏好保存或收藏二选一优先；按反馈完善未知信息处理 | migration 升级兼容性验证、规则回归、evaluation dataset v1 |
 | 3 | 验证角色与模型选择的价值 | Persona / Skill registry；第二个 provider；有证据再加入比较模式 | capability tests、partial failure、成本与 latency 对比 |
 | 4 | 验证小范围持续使用与运行能力 | 根据反馈优化体验、数据维护、运行监控；满足条件时进入受控 Beta | release promotion、恢复演练、告警、容量与使用反馈 |
 
@@ -385,19 +389,19 @@ GitHub 提供 [ECR / ECS deployment 示例](https://docs.github.com/en/actions/h
 
 建议最小路径为：
 
-**明确来源与使用条件 → 保存原始菜单及采集时间 → 提取 / 清洗 → schema validation → 人工审核 → Java 发布版本 → 监测过期与更新。**
+**明确来源的获取 / 存储 / 展示 / LLM processing 条件 → 按许可保存原始证据与采集时间 → 提取 / 清洗 → Java draft 与 schema validation → complete → 人工审核 → Java 原子发布版本 → 查询时检查有效期并持续更新。**
 
 首轮可手工完成获取和审核，但来源、版本、未知字段与发布边界应从一开始存在。Data owner 的完成标准是“应用能够使用且知道其来源的目录数据”，而非只交付一个 CSV 或 crawler。
 
 关键约定包括：
 
-- 门店和菜品如何识别、去重；每个 MenuItem 对应哪个门店与菜单版本。
-- 价格和 currency 的格式、未知值处理、采集和审核时间。
+- 门店和菜品如何识别、去重；MenuItemRevision、渠道 OfferVersion 与 MenuSnapshot 的关联；同名不能直接 merge。
+- DECIMAL / JSON decimal string、AUD、规格与 selected options、MENU_SUBTOTAL、未知费用、采集和审核时间。
 - 过敏原信息的已知 / 未知状态；未标注不能自动被当成安全结论。
-- 哪些记录处于 draft、reviewed、published 或 stale；谁能批准发布。
-- 菜单更新怎样影响候选、cache 和历史推荐记录。
+- `workflow_state=DRAFT/REVIEWED/PUBLISHED/WITHDRAWN` 与 `freshness_state=FRESH/STALE/UNKNOWN` 分离；review decision 和发布权限分别记录。
+- 发布 transaction 更新 catalog revision；cache 使用版本化 key；最终校验同时验证菜品与价格版本，变更返回 DATA_CHANGED；历史证据遵循来源 retention。
 
-这些口径由 Data、Backend、Product 共同定义。Python ingestion 通过 Java API 发布，遵循现有业务数据 ownership。
+这些口径由 Data、Backend、Product 共同维护，具体以数据要求为准。Python ingestion 使用独立身份经 Java API 提交 draft，没有 publish 权限；reviewer / publisher 经 Admin API 审核发布。AI tools 只读，三类权限不能混用。
 
 ### 10.2 AI Application 与训练的分界
 

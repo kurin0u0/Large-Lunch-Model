@@ -1,51 +1,60 @@
 # Large-Lunch-Model
 
-百模百味，寻找你最喜欢的赛博饭友
+百模百味，寻找你最喜欢的赛博饭友。
 
-## 2026-10-27
+面向悉尼 CBD 及周边的门店和菜品目录，以可追溯的菜单事实支持预算内选餐，逐步扩展不同 Model、Persona 与 Skill。
 
-今天写入了两份基线，并让仓库忽略 macOS 的 `.DS_Store`。服务代码、云资源和模型凭证都还没有开始。
+## 2026-10-29
 
-- [tech-stack-requirements.md](tech-stack-requirements.md)：前端、Java 业务后端、Python AI 服务、数据和 AWS 的技术边界。
-- [docs/delivery-model-comparison-au-us-cn.md](docs/delivery-model-comparison-au-us-cn.md)：对照澳洲、美国、中国的公开交付实践，整理团队分工、启动条件和前四轮讨论路线。
+这次在已有技术基线和交付讨论之上，把数据、云端和本地开发拆成三份专题要求，并让预算、版本和发布边界在各文档里使用同一套口径。服务、数据库、Compose、测试、AWS 资源和平台接入都还没有实现。文档里的命令、API 和目录是初始化约定。
 
-这两份文件是建议，用来选择后续做法。团队人数、Sprint 长度和上线日期尚未确定。
+用户已确认的预算规则：**按菜品小计计算，包含所选规格、必选加料、实际选择的可选加料和数量；配送费与平台 service fee 等订单级费用另列。** 页面使用“菜品小计，配送费及平台费用另计”。持久化口径是 `MENU_SUBTOTAL`，首版货币为 `AUD`。
 
-## 按文档的开发规划
+本轮文档修订：
 
-下面三张图直接摘自上述文档，方便从仓库首页看到顺序。前四个 Sprint 按两周讨论，Sprint 2 之后要根据上一轮的用户反馈、人手和失败证据重排，不是八周交付承诺。
+- 修正首轮与后续功能混在一起、平台价格和菜品 identity 混用、导入与 AI 权限边界不完整的问题。
+- 新增数据、AWS、本地开发三份要求，统一预算、不可变事实版本、审核发布、cache、identity 和错误处理。
+- 补齐从空库建立来源与目录的路径，以及可重复执行的 synthetic fixtures。本地 mock、真实 provider、staging 和 production 要分别验收。
 
-证据阶段的时长由证据决定，一个阶段里可以有多个 Sprint。
+## 文档导航
 
-```mermaid
-flowchart LR
-  discovery["Discovery：用户为何不用现有平台，可信菜单从哪来"]
-  alpha["Alpha：带角色的推荐是否有用，技术上是否走得通"]
-  beta["Beta：用户能否持续选完餐，系统能否稳定运行"]
-  live["Live：是否具备长期维护和持续改进"]
-  discovery --> alpha --> beta --> live
-```
+| 文件 | 解决的问题 |
+| --- | --- |
+| [技术栈与 architecture 要求](tech-stack-requirements.md) | 阶段范围、服务边界、预算、API、推荐流程、版本与验收 |
+| [数据要求](docs/data-requirements.md) | 来源权限、MenuItem / Offer、provenance、schema、freshness、导入审核发布与质量 |
+| [AWS 要求](docs/aws-requirements.md) | Staging / production、网络、IAM、存储、TLS、CI/CD、成本与恢复 |
+| [本地开发要求](docs/local-development.md) | Host + Docker Compose、版本锁定、env、mock provider、fixture、启动顺序与排障 |
+| [交付实践与团队组织](docs/delivery-model-comparison-au-us-cn.md) | 团队 ownership、Discovery / Alpha / Beta、Sprint 与交付协作建议 |
+
+先读总体 architecture，再按职责读三份专题。字段含义以专题文档为准；schema 变更必须同时改相关 API、fixtures 和验收。
+
+## 按文档的开发顺序
+
+阶段名称和完成标准来自技术基线第 1.1 节。团队人数、Sprint 长度和上线时间仍未确定；交付文档里的两周 Sprint 是讨论方案。
 
 ```mermaid
 flowchart TD
-  prep["启动准备：场景、数据来源、最小 contract、一个 provider、staging 权限"]
-  s1["Sprint 1：walking skeleton，seed data，单 provider，pipeline 部署到 staging"]
-  s2["Sprint 2：菜单审核与更新，偏好保存或收藏先做其一"]
-  s3["Sprint 3：Persona 与 Skill 注册表，第二个 provider，有证据再做模型比较"]
-  s4["Sprint 4：按反馈改体验和数据维护，条件满足时进入受控 Beta"]
-  prep --> s1 --> s2 --> s3 --> s4
+    prep["启动准备：场景、来源样本、最小 data / API contract"]
+    local["本地 walking skeleton：页面到 Java、MySQL、mock provider，再回到页面"]
+    alpha["Sprint 1 / 受控 Alpha：审核后的真实菜单、一个 provider、受限 staging"]
+    later["后续增量：偏好或收藏、审核 UI、第二个 provider、更新自动化"]
+    prod["Production / Beta：权限、恢复、成本与维护责任"]
+    prep --> local --> alpha --> later --> prod
 ```
 
-第一条要跑通的路径是 walking skeleton：薄，但从页面一直连到数据和模型。
+第一条要跑通的路径先用 synthetic fixtures 和 mock provider 在本地闭合，再分别验证真实菜单、一个真实 provider 和受限 staging。
 
 ```mermaid
 flowchart LR
-  user["用户输入预算"] --> java["Java 查询已审核菜品"]
-  java --> python["Python 调用一个模型"]
-  python --> check["Java 校验菜品 ID 与约束"]
-  check --> page["页面展示带来源的推荐"]
+    source["获准来源 / synthetic fixture"] --> draft["Java 导入、校验、审核与发布"]
+    draft --> catalog[("MySQL 已发布菜单与 OfferVersions")]
+    user["用户输入菜品小计预算"] --> java["Java 筛选候选"]
+    catalog --> java
+    java --> ai["Python：mock 起步，再接一个真实 provider"]
+    ai --> verify["Java 复核版本、来源、配置与小计"]
+    verify --> page["页面展示有来源的推荐"]
 ```
 
-Sprint 1 不包含多模型比较、管理后台、自动 OCR、大规模抓取、复杂 LangGraph、Live2D 或 3D。这些留在后续 backlog。
+首轮是单人、单店、单渠道选餐，不要求四个平台全部接通。样本规划量级是 5–10 家门店、30–50 个经过审核的 MenuItems，尚未采集。多模型比较、多人点菜、完整管理 UI、自动 OCR、大规模 crawler、embedding、复杂 LangGraph、Live2D 和 3D 留在后续 backlog。
 
-Markdown 里用三个反引号加 `mermaid` 即可画出这些图。GitHub 和 Cursor 的 Markdown 预览会直接渲染，仓库不需要额外插件。若本地预览只显示代码块，在编辑器扩展里安装 Markdown Preview Mermaid Support。
+图使用 Markdown 的 `mermaid` 代码块。GitHub 和 Cursor 预览会直接渲染。
