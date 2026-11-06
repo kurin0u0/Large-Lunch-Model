@@ -1,11 +1,12 @@
 # Large-Lunch-Model：澳洲、美国、中国交付实践与团队组织对比
 
-- 版本：v0.2，供选择与讨论；技术与预算边界于 2026-10-29 同步。
+- 版本：v0.3，供选择与讨论；安全、并发与首轮 User Stories 于 2026-11-06 同步。
 - 编写与来源核对日期：2026-10-27（Australia/Sydney）。
 - 项目基线：[tech-stack-requirements.md](../tech-stack-requirements.md)；专题要求：[数据](data-requirements.md)、[AWS](aws-requirements.md)、[本地开发](local-development.md)。
 - 用户已确认的预算口径：`MENU_SUBTOTAL`，包含所选规格、必选与已选可选加料和数量；配送费与平台 service fee 等订单级费用另列。本文中的费用与版本语义按技术基线执行。
 - 状态：本文是 operating model 建议，尚未选定团队组织、人员、Sprint 长度或上线日期；不代表 CI/CD 或产品功能已经实现。
 - 排期假设：以 6–8 人、可持续的接近全职投入为主要讨论场景。实际人数、经验、每周投入、AWS 资源和数据来源均待确认；兼职团队应按实际 capacity 缩小每轮范围。
+- 当前产品要求：保留 ECS Fargate；首轮 AI 必须注册登录、邮箱验证、Turnstile 与跨实例 admission。正式 Stories 见 [MVP 与 User Stories](sprint-1-mvp-and-user-stories.md)，本文件的团队人数与 Sprint 排期仍只是讨论方案。
 - 阅读顺序：先看第 1、3、4、13 节选择模式，再看第 5–12 节了解执行细节。
 
 ## 1. 当前最值得考虑的组织方式
@@ -232,12 +233,13 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 ### 6.2 一条 Story 如何跨专业协作
 
-示例：**一位用户输入本次菜品小计 AUD 25 的预算，希望看到来自真实菜单的可选菜品及推荐理由。** 首轮单人、单店、单渠道，不包含配送费与 service fee。多人方案的总预算和份量规则留到该功能启用时定义。
+示例：**一位已登录、邮箱已验证的用户输入本次菜品小计 AUD 25 的预算，通过 Turnstile 且有可用额度后，希望看到来自真实菜单的可选菜品及推荐理由。** 首轮单人、单店、单渠道，不包含配送费与 service fee。多人方案的总预算和份量规则留到该功能启用时定义。
 
 | 工作 | 主要 owner | 前置约定 | 可并行的部分 |
 | --- | --- | --- | --- |
 | 落实已确认预算口径与交互 | Product / UX | MENU_SUBTOTAL、规格 / options、quantity、排除费用的展示 | 页面草图、测试场景 |
 | 提供审核后的菜品 fixture | Data | MenuItemRevision、OfferVersion、SourceRecord、snapshot、freshness | 人工数据准备与 backend 开发 |
+| 登录 / challenge / admission | Backend + Frontend + Platform | Cognito、Turnstile、owner、幂等、quota ledger 与错误 UX | local mock 与 cloud setup 可并行 |
 | 查询候选与最终规则校验 | Backend | budget contract、错误码、数据版本 | 用 fixture 完成 API 和测试 |
 | 生成解释与引用 | AI | 候选输入、structured output、provider capability | 先以 mock provider 验证 schema |
 | 展示输入与 streaming | Frontend | OpenAPI、SSE event、状态机 | 先对 mock API 开发 |
@@ -259,8 +261,8 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 1. 确定首个用户场景，例如悉尼 CBD 附近的单人工作日午餐；明确预算、数据覆盖与推荐边界。
 2. 明确成员、每周可用时间、专业 owner 和 backup，先确认 capacity 再承诺范围。
 3. 明确能合法使用的数据来源及更新方式，准备少量有来源的样本；首轮可手工整理。
-4. 按数据要求落实最小 contract：MenuItemRevision、OfferVersion、SourceRecord、MenuSnapshot、MENU_SUBTOTAL、ingestion / review / publish、recommendation request/result 与 SSE events。
-5. 确认一个 provider 的接入条件、AWS staging 的账号与权限、费用范围，以及负责者。
+4. 按 framework 与数据要求落实最小 contract：MenuItemRevision、OfferVersion、SourceRecord、MenuSnapshot、MENU_SUBTOTAL、ingestion / review / publish，以及 User / AuthSession、Conversation、AIRequest、admission / quota、recommendation request/result 与 SSE events。
+5. 确认一个 provider、AWS staging / Cognito、Cloudflare zone / Turnstile 的 access、费用范围与 owner；记录可配置初始 limits，不把它们当成已测容量。
 6. 建立一个 backlog、轻量 PR review 约定和初版 Definition of Done。
 
 这些是建议的开工条件；本文没有创建云资源或申请 model API credentials。
@@ -269,14 +271,16 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 这个示例以启动准备中的 AWS / provider access 已就绪、团队具备相应技能为前提。否则先根据可用条件制定实际 Goal，不直接承诺两周完成云端路径。
 
-**在受限访问的 staging 上，一位试用者可以输入简单条件，从有来源的菜单中获得一个模型生成、经 Java 校验的推荐；该版本可由 pipeline 构建和部署。**
+**在 Cloudflare 保护的受限 Fargate staging 上，匿名用户能使用基础目录；试用者完成注册、邮箱验证、登录与人机验证后，在共享配额与并发限制内，从有来源的菜单获得一个模型生成、经 Java 校验的推荐；该版本可由 pipeline 构建和部署。**
 
 首轮范围建议：
 
 - 小规模、人工审核的真实 seed data；例如 5–10 家门店、30–50 个 MenuItems，仅作为规划量级，不代表已经收集。每个候选有有效且已发布的 OfferVersion；synthetic fixtures 只用于开发与明确标识的演示。
 - 一条核心选餐路径、一个 provider、一个 Persona、一个 Skill。
 - 最小 streaming、客户端取消及下游尽力取消，以及无候选、provider timeout、输出无效三类失败行为；不承诺断线自动续传。
-- Java → Python 的内部身份边界、受限的 staging 访问；完整账号资料与收藏功能可在后续扩展。
+- Cognito 注册 / 登录 / 邮箱确认、退出与 session 撤销、私人会话 owner isolation；Java → Python 独立 service identity。完整个人资料与收藏可后续扩展，但 AI 登录门槛不能后移。
+- Cloudflare WAF / Turnstile、受限 origin、Cognito AWS WAF；API / SSE 不插入 HTML challenge。
+- MySQL atomic admission、配置化 user / global / provider concurrency 与 daily quota、唯一 dispatch、取消 / crash reconciliation；首轮即覆盖 2 Java + 2 AI 的 mock load。
 - 保留输入预算、SourceRecord、MenuItemRevision / MenuSnapshot / OfferVersion、实际 model ID 与请求状态的最小记录。
 - 首轮以 Admin CLI 完成来源与门店 bootstrap、导入、审核和发布；资料过期在查询时排除，不等待自动 scheduler。
 - CI、Flyway 初始 migration 与 seed 导入验证，以及一条可重复执行的 staging deployment 路径。
@@ -290,10 +294,10 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 | 时间 | 协作重点 | 希望看到的检查点 |
 | --- | --- | --- |
 | Day 1 | 对齐 Goal、acceptance criteria、contracts；建立可运行 repo 与最小 CI | 每人知道输入输出；首个 PR 能被自动检查 |
-| Day 2–3 | 同时推进 seed data、Java、AI adapter、页面、staging 基础环境 | 本地以 mock provider 贯通第一条请求路径 |
-| Day 4–5 | 尽早接入一个真实 provider，连接 MySQL 和 SSE | 真实候选与来源可被展示；发现集成问题仍有修复时间 |
+| Day 2–3 | 同时推进 seed data、auth / admission、AI adapter、页面、staging 基础环境 | 本地以 fixture auth、challenge mock、mock provider 贯通第一条路径 |
+| Day 4–5 | 完成 admission 多实例测试后，接入一个真实 provider；验证 Cognito / live Turnstile | 真实候选、来源与收费前安全检查一起成立 |
 | Day 6–8 | 加入规则复核、错误路径、记录、staging deployment | pipeline 能部署；Quality 与 Product 开始使用实际版本 |
-| Day 9 | 关键 E2E、受控 live smoke、发布证据与恢复演练 | 对已完成范围有可复查证据 |
+| Day 9 | 权限 / 并发 / quota E2E、origin 防绕过、受控 live smoke 与恢复演练 | 对已完成范围有可复查证据 |
 | Day 10 | Review、用户反馈、Retrospective、调整下一轮 backlog | 展示完整用户路径；明确剩余风险与下轮改进 |
 
 若 AWS 或 provider 权限尚未就绪，应在 Sprint Planning 结束前设定与现有条件相符的 Goal。正式 Scrum 的 Sprint 开始后发现阻碍时，团队与 Product Owner 协商 scope 和实现计划，保持 Sprint Goal；若 Goal 已过时，由 Product Owner 决定是否取消 Sprint。未能实现 Goal 时应如实记录，只报告已经验证的本地、mock、云端或真实模型路径。[Scrum Guide](https://scrumguides.org/scrum-guide.html)
@@ -309,7 +313,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 | LLM-05 | Enabler | CI 与 staging deployment | Platform / service owners | build、deploy、smoke 的 run 链接 |
 | LLM-06 | Data task | seed data 与审核记录 | Data / Product | 版本化数据与 quality report |
 
-这些 ID 是示例，没有创建真实 issues。Story 是否完成看用户路径和 Definition of Done；某个子任务合并不等于整条 Story 完成。
+上表 LLM-* 是历史讨论示例，不再作为执行编号；正式 backlog 使用 [User Stories](sprint-1-mvp-and-user-stories.md) 的 S1-US01–18 与 technical enablers，避免维护两套 acceptance criteria。尚未创建真实 issues。Story 是否完成看用户路径和 Definition of Done；某个子任务合并不等于整条 Story 完成。
 
 ## 8. 前四个 Sprint 的演进选项
 
@@ -317,7 +321,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 | Sprint | 目标 | 可选的主要增量 | CI/CD 与质量演进 |
 | --- | --- | --- | --- |
-| 1 | 证明最小选餐路径可运行 | seed data、单 provider、单 Persona / Skill、staging | 各服务 CI、初始 migration / seed、contract、关键 E2E、自动 staging |
+| 1 | 证明受保护的最小选餐路径可运行 | 目录、登录 / 邮箱、Turnstile、admission、seed data、单 provider、Fargate staging | CI、schema / seed、owner / quota / 多实例 tests、关键 E2E、origin 验证 |
 | 2 | 提高数据与推荐可信度 | 改善首轮已有的审核 / 更新流程和必要 UI；偏好保存或收藏二选一优先；按反馈完善未知信息处理 | migration 升级兼容性验证、规则回归、evaluation dataset v1 |
 | 3 | 验证角色与模型选择的价值 | Persona / Skill registry；第二个 provider；有证据再加入比较模式 | capability tests、partial failure、成本与 latency 对比 |
 | 4 | 验证小范围持续使用与运行能力 | 根据反馈优化体验、数据维护、运行监控；满足条件时进入受控 Beta | release promotion、恢复演练、告警、容量与使用反馈 |
@@ -330,7 +334,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 ### 9.1 与当前 architecture 对应的 pipeline
 
-基线采用 monorepo、GitHub Actions、Terraform、AWS ECS Fargate。可采用以下流程：
+基线继续采用 monorepo、GitHub Actions、Terraform、AWS ECS Fargate，新增 Cloudflare edge / origin 配置与 Cognito AWS WAF。可采用以下流程：
 
 ```mermaid
 flowchart TD
@@ -353,12 +357,13 @@ flowchart TD
 | 层次 | 建议检查 | 谁负责维护 | 首轮边界 |
 | --- | --- | --- | --- |
 | Frontend | lint、TypeScript、component tests、build | Frontend owner | 核心表单、结果与失败状态 |
-| Java | Maven build、业务规则 tests、MySQL integration tests | Backend owner | 初始 migration / seed；候选与最终 ID / 预算校验；关键身份边界 |
+| Java | Maven build、业务规则 tests、MySQL integration tests | Backend owner | schema / seed、候选与最终预算、AuthSession / owner、atomic admission / settlement |
 | Python | Ruff、type checking、pytest、schema / tools tests | AI owner | mock provider、timeout、无效输出 |
 | Contracts | OpenAPI / SSE fixtures、producer / consumer 一致性 | Java 与 Python / Frontend 共同维护 | 最小请求、结果、错误 event |
 | Data | 必填字段、类型、重复 ID、引用完整性、来源与版本 | Data owner | 首批 seed data 的自动检查 |
 | E2E | 选餐主路径、无候选、provider 失败、取消 | Quality 协调，相关开发者修复 | 少量高价值路径；核对 Java → Python → provider 的取消与超时行为 |
-| Infrastructure | Terraform 检查与 plan review、部署健康检查 | Platform owner | staging 所需资源与访问边界 |
+| Infrastructure | Terraform 检查与 plan review、部署健康检查 | Platform owner | Cloudflare / origin / Cognito WAF、secrets、Fargate 访问边界 |
+| Concurrency / abuse | 2 Java + 2 AI 的隔离 mock load；50 用户 / 10 tab / 20 同 key、故障与 quota 边界 | Backend + AI + Quality | 先证明共享 ledger 不超卖；live provider 不做大规模 load test |
 | AI evaluation | 菜品真实性、规则违反、引用、结构化输出、latency / cost | AI + Quality + Product | mock regression 加受控 live 验证 |
 
 每个 Story 都经过相关检查。Quality owner 负责让质量策略完整，不替所有开发者编写 unit tests。
@@ -367,7 +372,7 @@ flowchart TD
 
 1. **每个 PR：**快速、可重复的检查，默认使用 mock provider。先让失败易于定位，避免每次 CI 都依赖付费模型或外部不稳定服务。
 2. **合并到 main / staging：**真实服务 integration、部署健康检查、关键 E2E。按变更影响运行 AI evaluation；有受控 credentials 和预算时执行 live smoke。
-3. **候选 release：**检查实际启用 provider 的连通与能力、数据 / schema 兼容性、已知风险、可恢复性及产品验收证据。
+3. **候选 release：**检查实际启用 provider 的连通与能力、真实登录 / live Turnstile、origin 防绕过、共享 ledger 和 rolling deploy、数据 / schema 兼容性、可恢复性及产品验收证据。未实现首轮保护的公开 AI endpoint 不进入 release。
 
 模型和 prompt 的输出具有 variability；live evaluation 应保存样本、版本、参数与结果。一个偶然成功的回答不能代表能力已经稳定。
 

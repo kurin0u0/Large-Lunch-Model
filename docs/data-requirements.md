@@ -1,10 +1,10 @@
 # Large-Lunch-Model：数据要求
 
-- 版本：v0.1；更新日期：2026-10-29（Australia/Sydney）。
+- 版本：v0.2；更新日期：2026-11-06（Australia/Sydney）。
 - 状态：待实现的 data contract 与验收基线；本文未创建数据库、采集数据或取得平台授权。
-- 适用范围：悉尼 CBD 及周边的门店、菜单、渠道报价、来源、审核、发布和推荐证据。
+- 适用范围：悉尼 CBD 及周边的门店、菜单、渠道报价、来源、审核、发布、推荐证据，以及首轮账号、私人会话、admission 与 quota ledger。
 - 用户已确认：预算按菜品小计，包含所选规格与必选加料；配送费和平台 service fee 另列，不计入预算。
-- 关联文件：[技术架构](../tech-stack-requirements.md)、[AWS 要求](aws-requirements.md)、[本地开发](local-development.md)。
+- 关联文件：[技术架构](../tech-stack-requirements.md)、[AWS 要求](aws-requirements.md)、[本地开发](local-development.md)、[User Stories](sprint-1-mvp-and-user-stories.md)。
 
 ## 1. 首阶段交付范围
 
@@ -43,7 +43,7 @@ MySQL 金额使用 `DECIMAL(12,2)`，Java 使用 `BigDecimal`，Python 使用 `D
 
 首版只接受两位小数 AUD，输入超出精度或非 AUD 时返回 validation error；不做隐式汇率转换。数据库约束禁止负基础价，option adjustment 可为负，但最终 line subtotal 不得为负。
 
-推荐请求示例，所有 ID 均为说明用 placeholder：
+推荐请求的 budget / selection 字段示例，所有 ID 均为说明用 placeholder；这不是可匿名调用的完整 HTTP 请求。AI endpoint 还要求 access token、Idempotency-Key、conversation_id、expected_conversation_version 与 Turnstile token，详见 framework：
 
 ```json
 {
@@ -141,6 +141,40 @@ OfferVersion 不代表实时库存保证。`availability` 为 AVAILABLE、UNAVAI
 
 推断得到的菜系、翻译或口味标签标记 `evidence_type=INFERRED` 并保存方法 / model version。AI 推断不升级为商家确认的过敏原、价格或营业事实。
 
+### 4.4 账号、私人会话与额度实体
+
+这些是待实现 schema 要求。MySQL 由 Java 独占业务写入；Python 不持有 DB credentials。账号与 quota 从首轮存在，不以浏览器 tab、IP、进程内 map 或 Redis 临时 key 作为唯一身份 / 额度依据。
+
+| Entity | 最小字段与约束 |
+| --- | --- |
+| User | `user_id`、`cognito_issuer`、`cognito_sub`、`status=ACTIVE/DISABLED`、可信 `email_verified` / `identity_checked_at`、UTC timestamps；`UNIQUE(cognito_issuer,cognito_sub)`；不存密码 |
+| AuthSession | 从有效 access JWT 读取的 `origin_jti` 与 User 关联、撤销时间、`retain_until`；按 issuer / origin_jti 唯一，client 无权设置；撤销 tombstone 覆盖该 family 最长可能有效期 |
+| Conversation | `conversation_id`、`owner_user_id`、`version`、创建 / 更新时间、内容过期时间；owner + updated_at 索引用于受限分页 |
+| ChatMessage | `message_id`、`conversation_id`、`sequence`、`role`、受长度限制的正文、`request_id`、创建 / 删除时间；`UNIQUE(conversation_id,sequence)`，用户不能伪装 system / assistant role |
+| AIRequest | `request_id`、owner、conversation、operation、Idempotency-Key / payload hash、expected conversation version、发起 AuthSession / token expiry、business status、challenge 验证结果 metadata、provider / Prompt / admission config version、reservation bucket、dispatch claim 与完成时间；`UNIQUE(owner_user_id,operation,idempotency_key)` |
+| AdmissionLease | request、user / provider / global slot 关联、`lease_owner`、`fencing_version`、`lease_expires_at`、last heartbeat、admission state；同 request 唯一，slot 的占用与额度预留在同一 transaction |
+| QuotaBucket | subject type / ID、metric、window 起点、limit / config version、reserved / consumed units；`UNIQUE(subject,metric,window_start)`；非负与不超上限检查通过原子更新实现 |
+| QuotaAttempt | owner、request、DB timestamp；rolling 60 秒的新 turn attempts 包括验证失败；同 request 只记一次。transport 重复请求另受 edge / HTTP limit |
+| UsageSettlement | request、唯一 settlement event ID、provider request ID（若有）、input / output / 其他收费 token、usage 状态、cost estimate / pricing version、reservation adjustment；重放不重复扣减 |
+| SecurityAudit | request ID、脱敏 actor、事件 / reason code、config version、时间、最小来源 metadata；不含 token、完整 chat 或授权文件 |
+
+`AIRequest` 是入口与收费控制记录；`Recommendation` 是其经业务验证的结果。一个 request 最多关联一份完成的 Recommendation，失败 / 无候选 / 取消允许没有推荐内容。ChatMessage 的生成结果引用 request / Recommendation，不通过再次调用模型恢复历史。
+
+`User.email_verified` 只是来自可信 Cognito profile 的同步字段。每次新付费请求按 framework 查询受控 `AdminGetUser` 并核对 subject、Enabled 和邮箱确认；浏览器 flag、相同邮箱字符串或 ID token 不能代替 API auth。应用 DISABLED 不因 profile 同步自动恢复。private API 每次检查账号、session 与 owner；不同用户不可读取、取消、追加或修改彼此的记录，越权与不存在均返回 404。
+
+### 4.5 会话一致性与 admission ledger
+
+- Conversation append 使用 `expected_conversation_version` / CAS。一个新 turn 的接受与 version 更新、user message / request 关联在 atomic admission transaction 中完成；两个 tab 的不同输入不能相互覆盖或丢失。未通过 admission 的草稿保留在客户端，不能伪装成已接受消息。无候选的合法 turn 使用不预留付费 quota 的短接受事务，同样检查 owner / account / session、version 与会话无 active turn，再更新 version、保存消息和空结果；刷新可恢复该结果。若 request 已存在，优先复用已有结果，不因旧 expected version 再报冲突。
+- `AIRequest.business_status` 使用 `pending / running / completed / failed / cancelled`；与 framework SSE 状态一致。另设 admission state `RESERVED / IN_FLIGHT / RECONCILIATION_REQUIRED / SETTLED / RELEASED`。失败 / cancelled 并不等于 SETTLED / RELEASED；未知收费调用仍可占用 slot / reservation。
+- dispatch claim 由 Java 在 MySQL 中原子消费一次，Python 通过受限 internal API 领取。领取后进程崩溃或网络超时不自动再发起 provider 调用；保守记录未知状态。usage / terminal 回调带 request、claim / fencing version 和 event ID，Java 校验并幂等结算；旧 owner 的迟到回调不能重复释放 slot。
+- global / provider / user slot 与 daily request / token reservation 使用相同事务与固定锁顺序。先预留额度再访问 provider，外部 Siteverify、Cognito、provider 请求不持有数据库锁。额度总和必须可由 request ledger 重建，不允许 Redis 故障时切换到空计数器。DB 无法确认资格时 fail closed。
+- token reservation 包含完整 Prompt 上界和最大输出；默认 input 6000 / output 1000、每 turn 1 次 LLM，不能只按用户一句话计费。实际 usage 明确后结算差额；provider 已开始或可能开始但 usage 未知时保留上界，request quota 计数不退还。确认 provider 未开始的失败才可完全释放 daily reservation。
+- lease 初值 90 秒、续约 15 秒；到期转 reconciliation，不能仅靠 TTL 自动复用未知 provider slot。重新分配资格必须有可靠终态或受审计的人工处理依据，无法确认时保留占位并告警。无自动等待队列。
+- daily bucket 使用 DB UTC 时间、固定在 reservation 创建时的日期；跨午夜完成仍结算到原 bucket，active slot 不因日期变化清零。分钟限制是 rolling 60 秒；配置变更、容器重启与扩容不清空已消费 / 预留值。
+- 新 request 的 payload hash 包含 owner scope、operation、business input、conversation ID / expected version 与选定配置；重放使用已有 request 冻结的配置快照。hash 排除易变的 Turnstile / access token。challenge 只保存 outcome、action、hostname、验证时间、Siteverify retry UUID，不存 raw token；同 key 状态重读不重新校验一次性 token。
+
+初始 limits、完整错误码与请求顺序以 [framework 第 5、7 节](../tech-stack-requirements.md) 为唯一配置语义：每用户 active 1、global / provider 各 5、每用户 5 attempts / rolling minute、20 provider requests / UTC day、全局 100000 tokens / UTC day。数字是设计初值，不表示已有容量证据。
+
 ## 5. Schema 与 data quality
 
 ### 5.1 最小必填项
@@ -200,7 +234,7 @@ Branch 坐标缺失时仍可进入不含距离条件的目录，但不能声称�
 | --- | --- | --- | --- |
 | 获准保存的原始菜单、照片、PDF、response | gitignored `data/raw/` | Private S3 raw bucket / prefix | 来源 policy 决定保留时间，不走公共 CDN |
 | 清洗中间产物与 error report | gitignored `data/processed/` | Private S3 processing prefix | 不作为发布目录的唯一事实来源 |
-| Source、draft、review、published facts、版本、推荐记录、outbox | MySQL persistent volume | RDS for MySQL | Java 持有业务写权限 |
+| Source、draft、review、published facts、版本、User / AuthSession、私人会话、admission / quota、推荐记录、outbox | MySQL persistent volume | RDS for MySQL | Java 持有业务写权限 |
 | 热门查询与短期状态 | Redis | ElastiCache | 可重建，设 TTL；不替代 MySQL |
 | 可再分发的小型 fixture、schema、migration | Git；fixture 放在 `data/fixtures/` | CI / release artifacts | 明确授权或 synthetic；不提交批量真实 raw data |
 
@@ -231,7 +265,7 @@ Python AI service 不直接访问业务数据库或 raw bucket。Python ingestio
 | `POST /api/v1/admin/ingestion/batches/{id}/review` | reviewer / `catalog:review` | 对指定 payload hash 审核；保存 actor 与决定 |
 | `POST /api/v1/admin/ingestion/batches/{id}/publish` | publisher / `catalog:publish` | 校验版本与权限，在短 transaction 中发布 |
 
-首轮人工 import CLI 放在 `tools/ingestion/`，使用 operator 的 `catalog:import` 用户权限调用 `/api/v1/admin/ingestion`。本地自动测试也验证独立的 internal ingestion 路径。云端人工 CLI 经 HTTPS ALB 管理入口，不开放 `/internal/v1`，也不假定公网 CLI 能解析 Service Connect 地址。不得通过直接写 SQL 绕过 schema validation、review 和 publication rules。可由同一负责人兼任 reviewer / publisher，但各动作仍需独立 audit record。
+首轮人工 import CLI 放在 `tools/ingestion/`，使用 operator 的 `catalog:import` 用户权限调用 `/api/v1/admin/ingestion`。本地自动测试也验证独立的 internal ingestion 路径。云端人工 CLI 经 Cloudflare 保护的 HTTPS ALB 管理入口，不开放 `/internal/v1`，也不假定公网 CLI 能解析 Service Connect 地址。不得通过直接写 SQL 绕过 schema validation、review 和 publication rules。可由同一负责人兼任 reviewer / publisher，但各动作仍需独立 audit record。
 
 从空库启动时，顺序为 Flyway schema → operator 登记 Source policy / Restaurant / Branch → 创建 SourceRecord → 创建 batch → 上传 records chunks → complete → review → publish。Synthetic fixture bootstrap 同样调用这些 application services，固定身份由本地或测试 profile 提供；真实来源权限必须由人工核实，不能从输入 CSV 中直接信任。
 
@@ -288,7 +322,15 @@ Java 向 AI 只发送通过权限、状态和硬条件筛选的候选，包含 `
 
 模型输出至少包含上述 identity / version 引用、quantity、selected options、reason、source_ids 和 uncertainties。Java 校验这些 ID 属于原候选范围，并以当前业务版本再次检查价格、禁忌和授权。模型说明中的价格若与业务结果不一致，应移除或用业务事实模板重写，不自动再次调用付费模型，不能连同错误金额展示。
 
-Recommendation 保存请求预算与 scope、偏好快照、候选版本、最终选择、来源、实际 provider / model、Prompt / Persona / Skill versions 及完成状态。内容保留期限由用户数据 policy 与来源 policy 共同限制。
+Recommendation 保存 owner、request / conversation 引用、请求预算与 scope、偏好快照、候选版本、最终选择、来源、实际 provider / model、Prompt / Persona / Skill versions 及完成状态。历史读取仍检查源数据撤回 / 过期，不能把旧结果标为当前可售价格。
+
+### 9.1 私人数据、retention 与删除
+
+首轮只存恢复私人会话所需的最小内容；不会把公开目录的 cache 策略用于 chat。默认 chat / Recommendation 正文保留 30 天，非内容 quota / usage / security audit 保留 90 天；这些是项目初值，具体 Source policy 要求更短时取更短期限。未结算 reservation、session revocation tombstone 与必要删除标记按其有效期保留，不能因正文到期而重置配额或恢复撤销的 session。AIRequest 的非内容 idempotency metadata 初值保留 90 天，窗口内不因 chat 正文删除而重复调用；过窗不支持旧 key replay，新 turn 必须使用新 key。
+
+页面说明保存与外部 AI processing 范围；不把 email、access token、Turnstile token、精确住址加入 Prompt。application log / trace 默认不含完整 Prompt、chat 正文或 raw IP；限流确需的 IP 派生标识采用带密钥 hash 与短 TTL，不能称为完全匿名。公开 AI 概览必须来自获准公开的菜单事实并经版本校验，不含私人 chat / preferences，不能将任意用户的推荐提升为公共 cache。
+
+到期删除覆盖 message、推荐正文、相关 derived records / cache；保留允许的不可回推正文的最小 audit。backup 无法逐条即时删除时，设置明确过期周期，并在 restore 开放访问前重放 deletion / revocation tombstones、重算 freshness、reconcile quota。源码 / synthetic fixtures / Git 不包含真实账号和对话。
 
 ## 10. 首轮 fixtures 与验收
 
@@ -308,5 +350,14 @@ Recommendation 保存请求预算与 scope、偏好快照、候选版本、最�
 | 推荐生成期间涨价、撤回或来源过期 | Java 阻止旧版本成为最终结果 |
 | 菜单过期且 scheduler 尚未运行 | 查询时仍排除过期候选 |
 | 备份恢复与来源到期删除 | 恢复后重算有效性；不重新公开已撤销或到期内容 |
+| 同一 Cognito sub 并发首次登录 / 相同邮箱不同 subject | 前者创建一个 User；后者不凭 email 自动合并身份 |
+| 用户 A 读取 / 取消 / 向用户 B 会话追加 | 404；不泄露内容或调用 provider |
+| 两个 tab 用同一 conversation version 发送不同输入 | 最多一个接受；其他返回并发 / version 错误，未接受草稿可恢复 |
+| 20 个相同 key 重试，含已消费 Turnstile token | 一个 request / dispatch；返回原状态，不重复扣 quota 或重复验证 token |
+| 多 Java / AI replicas 同时争用最后一个 slot / token bucket | 不超卖；ledger 可重建，计数不为负 |
+| provider 已开始后取消 / 进程 crash / lease 过期 | 未知用量保守占位、进入 reconciliation，不以 TTL 免费重试 |
+| usage 回调重复 / 迟到，或跨午夜完成 | 幂等结算到原 bucket；不重复释放，不重置 active slot |
+| session logout / 禁用后重放仍未过期 JWT | application session / account check 拒绝；不能只验签 |
+| 正文到期删除、随后 restore | 私人内容不重新可见；revocation、未结算 ledger 和 quota 不被清空 |
 
 验收交付包括可再分发的 seed fixture、validation report、审核 / 发布记录、上述案例的实际执行结果以及可重复运行的 import 路径。本文仅定义这些要求，未执行测试或验证生产数据。

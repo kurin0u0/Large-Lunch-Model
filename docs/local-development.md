@@ -1,20 +1,22 @@
 # Large-Lunch-Model：本地开发要求
 
-- 文档版本：v0.1。
-- 更新日期：2026-10-29（Australia/Sydney）。
+- 文档版本：v0.2。
+- 更新日期：2026-11-06（Australia/Sydney）。
 - 状态：待实现的 development contract；当前 repository 只有设计文档，没有 application、Compose、Makefile、migration 或 seed importer。
 - 本文中的目录、环境变量与 commands 是初始化时必须实现和验证的约定，不代表今天已经可以运行。
-- 上游约定：[总体 framework](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[AWS 要求](aws-requirements.md)。
+- 上游约定：[User Stories](sprint-1-mvp-and-user-stories.md)、[总体 framework](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[AWS 要求](aws-requirements.md)。
 
 ## 1. 本地环境要达到什么结果
 
 一位开发者应能在不申请 AWS 资源、不提供真实 model API key 的情况下，通过 synthetic fixtures 与 deterministic mock provider 完成以下路径：
 
-**输入菜品预算 → Java 查询已发布 Offer → Python 返回结构化候选 → Java 复核 ID、版本、预算和禁忌 → 页面展示推荐与来源。**
+**匿名浏览目录 → 注册、验证邮箱并登录 → 提交菜品预算与 AI 消息 → Java 验证身份、Turnstile 与 admission quota → 查询已发布 Offer → Python 返回结构化候选 → Java 复核 ID、版本、预算和禁忌 → 页面展示推荐与来源。**
+
+首轮必须包含身份、配额、并发和失败路径；本地通过明确标记的 fixture identity 与 Turnstile adapter 模拟外部依赖。部署仍采用 ECS Fargate；本次不改为 Vercel 或 EC2。
 
 预算使用 `MENU_SUBTOTAL`：包含所选规格、必选加料、实际选择的可选加料及数量；配送费和平台 service fee 不计入预算，分别展示为已知金额或未知。Budget object 示例为 `{"amount":"25.00","currency":"AUD","scope":"MENU_SUBTOTAL"}`；金额的详细规则以[数据要求](data-requirements.md)为准。
 
-本地 mock 通过只能说明 application contract 可运行。真实 provider、真实来源数据、Cognito、AWS networking 与 production 发布仍有独立验证要求。
+本地 mock 通过只能说明 application contract 可运行。真实 provider、真实来源数据、Cognito、Turnstile Siteverify、Cloudflare edge rules、AWS networking 与 production 发布仍有独立验证要求。
 
 ## 2. 默认拓扑与地址
 
@@ -26,7 +28,7 @@
 | Spring Boot | Host process | `127.0.0.1:8080` | Business API、数据发布与最终校验 |
 | FastAPI | Host process | `127.0.0.1:8000` | AI orchestration、mock / real provider adapter |
 | MySQL | Docker container | Host `127.0.0.1:3306` → container `3306` | 业务持久化 |
-| Redis | Docker container | Host `127.0.0.1:6379` → container `6379` | 开发和验证 cache、限流与临时状态 |
+| Redis | Docker container | Host `127.0.0.1:6379` → container `6379` | 可重建 cache、限流预筛选与临时状态；不作为 AI admission 权威账本 |
 | 原始资料 storage | Host filesystem | 不提供公开 HTTP 目录 | Raw / processed 文件 |
 
 ```mermaid
@@ -50,7 +52,7 @@ flowchart LR
 - Proxy 只匹配 `/api/v1` 及其子路径，不代理 `/internal/v1`、Actuator 或本地管理调试路径。
 - 同源 proxy 不代替身份验证；Java 继续验证用户与管理员权限。采用 cookie 时还须处理 CSRF；采用 bearer token 时不得把 token 放入 URL。
 - 本地 SSE 必须穿过实际 Next.js proxy 验证首段到达、持续输出与取消；若选定版本的 rewrite 不满足要求，应实现并验证透传 Route Handler。
-- AWS 由 ALB 将 `/api/v1` 直接路由到 Java；本地 proxy 和云端入口使用相同 API contract，部署时不能依赖本地 rewrite 才能访问业务。
+- AWS 公网入口经过 Cloudflare，再由 ALB 将 `/api/v1` 路由到 Java；本地 proxy 和云端入口使用相同 API contract，部署时不能依赖本地 rewrite 才能访问业务。本地 loopback 不能证明 Cloudflare WAF、origin isolation 或真实 client IP 传递已经正确。
 
 ### 2.2 Container 地址约定
 
@@ -123,11 +125,23 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 | `AI_PROVIDER_MODE` | `mock` 或 `real` | Python |
 | `AI_PROVIDER_ID` / `AI_MODEL_ID` | Mock 模式也记录固定 ID | Python |
 | `BUSINESS_TO_AI_TOKEN` | 单独生成的本地 service credential | Java / AI |
-| `AI_TO_BUSINESS_TOKEN` | 只读 tools credential | AI / Java |
+| `AI_TO_BUSINESS_TOKEN` | 受 request scope 限制的只读 tools、dispatch claim / usage credential | AI / Java |
 | `INGESTION_TO_BUSINESS_TOKEN` | 仅导入权限的 credential | Import client / Java |
 | `LOCAL_USER_TOKEN` / `LOCAL_ADMIN_TOKEN` | 对应不同 fixture actors | Java；用户手动输入本地页面 / admin CLI |
+| `TURNSTILE_MODE` | `mock`、`test` 或 `live`；含义见 6.1 | Java；Next.js 使用相同的显式 mode |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public sitekey；mock 模式不加载 Cloudflare widget | Browser |
+| `TURNSTILE_SECRET_KEY` | Siteverify secret；仅 Java 读取，test mode 使用官方 test secret | Java |
+| `TURNSTILE_ALLOWED_HOSTNAMES` | 真实环境的明确 hostname allowlist；不接受任意来源 | Java |
+| `AI_MAX_ACTIVE_PER_USER` / `AI_MAX_ACTIVE_GLOBAL` / `AI_MAX_ACTIVE_PER_PROVIDER` | `1` / `5` / `5` | Java admission |
+| `AI_REQUESTS_PER_USER_PER_MINUTE` / `AI_REQUESTS_PER_USER_PER_DAY` | `5` / `20`；滚动 60 秒与 UTC 日分别计量 | Java admission |
+| `AI_TOKENS_GLOBAL_PER_DAY` | `100000`；input + output 的全局 UTC 日预算 | Java admission |
+| `AI_MAX_INPUT_TOKENS` / `AI_MAX_OUTPUT_TOKENS` / `AI_MAX_CALLS_PER_TURN` | `6000` / `1000` / `1` | Java contract、Python provider adapter |
+| `AI_MAX_MESSAGE_CHARS` / `AI_MAX_REQUEST_BYTES` | `2000` Unicode code points / `32768` bytes；body 读取时即限制 | Java validation；web 同步提示 |
+| `AI_QUEUE_ENABLED` | `false`；超出容量立即拒绝，不排无限队列 | Java admission |
 
 三个 service token 名在本地与云端一致，实际值、caller identity、scope 和 Secrets 分环境隔离。云端传输与轮换遵循[总体 framework](../tech-stack-requirements.md)和[AWS 要求](aws-requirements.md)。
+
+上述 AI 数值是首轮可配置默认值，不是已经测得的系统 capacity；quota 的唯一 contract 以总体 framework 为准，修改时同步 fixtures 与部署配置并记录 config version。每日 request quota 计入 provider 已启动或可能已启动的尝试；在启动前原子预留，仅明确未启动失败可释放。滚动 rate limit 独立计算每个新 turn 的提交尝试，验证失败也计入；同 key 查询已有状态不重复计数，不能以 provider 未启动为由无限重试。Input token 上限包含系统指令、历史与候选资料，不能只计算本轮用户文本。
 
 - Service、database、provider 和 admin secret 不使用 `NEXT_PUBLIC_` 前缀，不进入 browser bundle、URL、日志、container image 或 Git。用户 access token 只在其 browser session 内存中使用，不编译进 bundle，也不写 localStorage。
 - `.env.example` 只允许非敏感默认值与占位值；启动时拒绝仍为占位符的 credentials。
@@ -142,10 +156,45 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 1. `local_fixture` 仅允许 `APP_ENV=local`，并要求 Next.js、Java、AI 和数据库 published ports 绑定 loopback。
 2. Java 将独立 local bearer tokens 映射到固定 fixture actors 和 roles；token 不得来自任意 `user_id`、`role` header 或 query 参数。
 3. 普通用户和 admin 至少使用两个不同 actors。Java 从私有 env 读取并校验 fixture token；开发者在仅 local profile 出现的页面手工输入 `LOCAL_USER_TOKEN`，页面仅保存在内存并作为 Authorization header 发送，不提供读取服务器 env 的 endpoint。`LOCAL_ADMIN_TOKEN` 只交给 admin CLI，fixture admin 显式拥有 source/catalog manage、import、review、publish scopes；production 不沿用该 token。用户 token 无法调用管理接口。
-4. Service credentials 分配不同 audiences / scopes：Java → AI、AI → Java read、ingestion → Java write 相互不可替代。
+4. Service credentials 分配不同 audiences / scopes：Java → AI、AI → Java read / claim / usage、ingestion → Java draft write 相互不可替代。
 5. `local_fixture` 配置不进入 staging / production。非 local 环境发现此 mode、local tokens 或缺失 issuer 配置时应 fail closed，CI 需覆盖启动拒绝案例。
-6. 云端身份验证使用 Cognito；本地 fake actor 测试不算 Cognito integration test。
-7. 若需要手机或跨机器开发，另建明确的 development profile 和认证网络配置；不得直接将 fixture mode 改为监听 `0.0.0.0`。
+6. 云端身份验证使用 Cognito managed login、Authorization Code + PKCE。Java 验证 access token 的签名、issuer、expiry、token_use、app client / audience 与 scope；ID token 不充当 API credential。本地 fake actor 测试不算 Cognito integration test。
+7. 最小 fixture actors 包含匿名、已验证邮箱的普通用户 A / B、未验证邮箱用户、disabled 用户与 admin。邮箱确认来自 Java 在新付费 turn 通过 Cognito `AdminGetUser` 取得的 `Enabled` 与 `email_verified`，并结合应用 `User.status=ACTIVE / DISABLED` 判断；不接受 browser 自报字段。Local fixtures 模拟相同可信 profile 分支。每个私人请求检查服务端 account 与 AuthSession 状态；token expiry 必须要求重新登录。
+8. AI chat、新生成的推荐及未命中缓存的 AI overview 都走同一身份与配额 gate；匿名可读取公开目录和已批准的缓存概览，cache miss 不得触发后台付费调用。Conversation、message 和 recommendation 归属于服务端确定的 owner；用户 A 访问 B 的 ID 统一返回 `404 NOT_FOUND`，不泄漏资源存在性。
+9. `POST /api/v1/auth/logout` 将当前 token family 的可信 `origin_jti` 写入 AuthSession revoke 状态，保留到该 family 最大有效期；随后 browser 完成 Cognito revoke / logout、清理 token 与私人缓存并广播给其他 tab。当前 family 已撤销但 JWT 其他校验仍有效的重复 logout 可幂等成功；该例外不授予任何私人读取权限。服务端 logout 失败时提示结果未确认，仍清本机敏感状态。测试复制注销前 access token 后再次请求也应受拒绝，不能仅证明页面返回登录状态。
+10. 若需要手机或跨机器开发，另建明确的 development profile 和认证网络配置；不得直接将 fixture mode 改为监听 `0.0.0.0`。
+
+### 6.1 Turnstile 的三种验证模式
+
+| Mode | 用途 | 允许环境与通过含义 |
+| --- | --- | --- |
+| `mock` | Deterministic adapter 模拟 pass、fail、expired、duplicate、timeout 和 hostname / action mismatch | 仅 local / CI；不访问 Cloudflare，不证明真实 Siteverify 可用 |
+| `test` | 加载官方 test sitekey，Java 调用 Siteverify 并使用配套 test secret | 仅 local / CI；验证 widget / network / response handling，不证明真实 bot detection |
+| `live` | 每个新 AI turn 使用该环境真实 sitekey / secret，Java 调用 Siteverify | staging / production 必须使用；有独立 hostname allowlist |
+
+官方 test keys 用于可重复的自动化测试，不是线上保护；production key 不允许 localhost。只有 public sitekey 可以进入 browser，secret 不进入任何 `NEXT_PUBLIC_*` 变量。[Cloudflare Turnstile testing](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
+
+Live mode 的 Java 必须验证 Siteverify `success`、预期 `action=ai_chat` 与 hostname；按需 overview 等其他生成入口启用时使用各自明确 action allowlist 并复用同一 admission service。Token 有效期为 300 秒且只能使用一次。缺失、过期、重复或不匹配均拒绝新 AI 调用；Siteverify 网络故障也不能跳过验证。客户端获取新 token 后由用户明确重试；已终态失败的 request 使用新 key 建立新 turn，不自动提交另一次付费生成。[Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
+
+Test mode 根据官方 dummy response 建立独立、显式的测试 expectation（例如文档中的 `hostname=localhost`、`action=test`），不得据此放宽 live validator。Hostname / action / expiry 的业务拒绝分支由 mock response contract tests 覆盖，并在 staging 使用 live token 重验。CI 中 fixture auth 使用隔离 runner 的 `APP_ENV=local`；不把 `APP_ENV=ci` 当作绕过 local-only auth guard 的隐含例外。
+
+同一 owner、同一 `Idempotency-Key`、相同业务 payload 的重试先查已有 request，返回该 request 状态，不重复消费 Turnstile token，也不再次调用 provider。业务 payload hash 排除短期 Turnstile token；并发首次请求由数据库 unique constraint 与 request ownership 保证只有一个 verifier。Siteverify transport retry 使用稳定的 `idempotency_key`。Mock adapter 也必须覆盖这些分支，不能简单对全部请求返回 true。
+
+非 local / CI 环境检测到 mock / test mode、官方 test keys、local fixture tokens 或不完整 live 配置时启动失败；CI profile 本身不得发布到公网。真实 widget 的 CSP 与浏览器加载失败需要单独验证；不得为了使 widget 可用而关闭全部 CSP 或开放任意 CORS。外部 challenge script 不能写入应用 auth token。
+
+### 6.2 Admission 与并发测试拓扑
+
+MySQL 中的 admission ledger 是跨 Java / AI replicas 的统一权威；用户、provider、全局 active slots 与 quota 必须在短 transaction 内原子预留。网络、Turnstile 与 provider 调用不在持有数据库锁的 transaction 中执行。Redis 可以提前筛掉明显超限请求，但 Redis 可用、故障或未启动都不能绕过 MySQL admission。
+
+Python 调用 provider 前必须以 AI service identity 和 Java 签发的 request-scoped context，通过 `POST /internal/v1/ai-requests/{id}/claim` 原子领取唯一 dispatch claim；同一请求的重复 internal stream 调用不能再次领取。只有领取成功才可启动 provider；claim 前后网络结果不确定时不得自动重新 dispatch。通过 `POST /internal/v1/ai-requests/{id}/usage` 幂等回报终态与用量，Python 不直接写 MySQL。该机制保证本系统不会主动重复 dispatch，不宣称第三方 billing exactly-once。
+
+初始化时另提供显式 load-test profile：两个 Java instances 和两个 AI instances 共用测试 MySQL，由测试 router 分散流量；所有 ports 绑定 loopback 或隔离 CI network，不能暴露到公网。Profile 提供可观测 mock provider invocation counter 与 latch，使测试能证明同时在途的调用数，而不只观察 HTTP 返回码。每组测试使用独立 namespace / database；单次 admission 测试中的全部 replicas 必须共用同一 ledger，不能按 process 自动隔离 quota。
+
+- Lease 初值 90 秒，每 15 秒续约，使用 DB 时间与 owner / fencing version；provider connect timeout 5 秒、operation deadline 60 秒、Java request deadline 90 秒、SSE heartbeat 15 秒；云端 ALB idle timeout 与 Service Connect per-request / idle timeout 为 120 秒。实现必须验证 deadline、heartbeat 与续约的关系，不能把 lease expiry 当作释放资格。
+- Browser disconnect、Cancel、Java crash 或 lease expiry 不等于远端 provider 已停止。对 provider 是否已启动或结束不确定的 request 保留保守 reservation，并进入 bounded reconciliation；不能盲目释放 slot 后立即再次生成。超出 reconciliation deadline 仍无法确认时停止受影响的新 admission 并告警；这些控制不宣称能强制终止 provider 内部计算。
+- provider 已启动或可能已启动的失败、timeout 和 Cancel 仍计入每日 request quota；actual usage 有唯一结算 key。Unknown usage 不按零计费，保守保留 token reservation，避免重复扣减或负数；旧 owner 迟到回调不能越过 fencing version 覆盖终态。
+- 预留完整 input + 最大 output token 上界；真实 usage 只能在幂等结算后释放多余额度。跨 UTC 午夜的请求保留原 quota bucket 与 active slot，不因新日期而获得额外并发。
+- 同 conversation 的两次不同请求使用 version / 条件更新避免历史交错；同一个用户的多 tab 不得到额外 active slot。HTTP / SSE error 与 quota 文案必须与 framework 统一。
 
 ## 7. 数据库、migration 与导入
 
@@ -168,7 +217,13 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 
 Synthetic 自动化测试使用固定 `reference_time` 与可注入 test clock。交互式本地 fixture 导入可按相对时间生成 synthetic observation，并将生成时间写入 dataset instance manifest；同一 instance 重试幂等，重新生成新 instance 使用新 key。staging / production 禁止 fixture clock 覆盖真实时钟。真实 pilot 菜单绝不能重置 observed_at 假装重新采集，过期必须真实重核。
 
-### 7.3 Import 路径
+### 7.3 身份、chat 与 admission fixtures
+
+Flyway 首轮必须创建 User / identity mapping、AuthSession、Conversation、ChatMessage、AIRequest、QuotaBucket、AdmissionLease 和必要的 unique / foreign-key / version constraints；具体字段以[数据要求](data-requirements.md)为准。Fixtures 只使用虚构邮箱、虚构对话与测试身份，不包含真实 access token、密码、Turnstile token 或 provider key。
+
+至少提供 quota 临界值、午夜跨 bucket、已有 active request、stale lease、provider-started 但 usage unknown、已完成幂等 request、同 key 不同 payload、跨 owner 资源和 revoked token family 等状态。Request 生命周期为 `pending / running / completed / failed / cancelled`；独立 admission 生命周期为 `RESERVED / IN_FLIGHT / RECONCILIATION_REQUIRED / SETTLED / RELEASED`。两者不能用同一状态字段混淆。Test clock 只在测试 profile 注入；AI request deadline、quota time window 与 lease 测试使用受控 clock，真实 staging 配额仍使用服务端当前 UTC 时间。安全与 usage ledger 不通过导入目录数据的 ingestion API 创建，测试 fixture 入口不能在 production 暴露。
+
+### 7.4 Import 路径
 
 1. 空库先 migration；admin CLI 通过管理 API 登记 Source policy、Restaurant、Branch。真实来源权限由 operator 核实，不能信任 CSV 自报 ALLOWED。
 2. Import client 规范化 CSV / JSON 并校验；使用 `catalog:import` 用户身份调用 `/api/v1/admin/ingestion/source-records` 登记证据，再创建 batch、提交 records chunks、complete 固定 manifest。独立内部 worker API 使用 ingestion service token，二者调用同一 Java application service。
@@ -193,7 +248,8 @@ Import client、AI service、Python worker 均不得绕过 Java 直接写业务�
 | `make seed-fixtures` | 经 Java API 幂等导入、审核与发布明确标记的 synthetic dataset |
 | `make dev-ai` | 启动 FastAPI，默认 deterministic mock provider |
 | `make dev-web` | 启动 Next.js，启用本地同源 API proxy |
-| `make smoke-local` | 验证目录、预算、SSE、权限与错误路径，输出 request IDs |
+| `make smoke-local` | 验证匿名目录、已验证用户 AI、Turnstile adapter、预算、SSE、权限与错误路径，输出 request IDs |
+| `make test-admission` | 使用隔离 mock profile 的 2 Java + 2 AI 验证 shared ledger、quota、并发、幂等与 crash recovery；不调用真实 provider |
 | `make check` | 执行约定的 lint、type check、unit、integration 与 contract checks |
 | `make infra-stop` | 停止基础设施，保留 volumes |
 
@@ -208,8 +264,8 @@ Dependency 安装使用各语言原生工具：pnpm 管理 JS / TS workspace，M
 - Java 本地提供 `/actuator/health`，返回最小状态；readiness 应能反映必要数据库与 schema 是否可用。
 - AI 提供 `/healthz`；health probes 不发起真实 LLM 请求、不消耗模型费用。
 - Frontend 提供轻量 `/healthz`，可加载不依赖生成的页面，并清晰显示 API unavailable。
-- Redis 故障与 model 故障分别处理：目录读取可按规则 fallback 到 MySQL；限流故障不能无条件放开真实模型调用。
-- 本地默认启动 Redis；若显式禁用，应实现并启用基于 MySQL 的 request / concurrency quota 与配额释放策略，保持真实模型调用限制。
+- Redis 故障与 model 故障分别处理：目录读取可按规则 fallback 到 MySQL；AI admission 始终以 MySQL ledger 为准，不能在 Redis 故障时换到互不共享的 process counters。
+- 本地默认启动 Redis；显式禁用 Redis 时仍运行同一 MySQL admission 路径。MySQL ledger 不可用时拒绝新付费请求；不得转向 Redis counter 或内存 counter 放行。
 - Compose 的 container started 不等于 database ready；必须有 readiness 等待与 bounded retry。
 
 ## 9. 本地验收案例
@@ -224,14 +280,48 @@ Dependency 安装使用各语言原生工具：pnpm 管理 JS / TS workspace，M
 | 相同菜名、不同门店或规格 | 保持独立，未经审核不自动合并 |
 | 模型返回不存在的 Offer ID 或跨候选记录 | Java 拒绝，不能写入成功推荐或展示权威价格 |
 | 生成过程中 MenuItemRevision / MenuSnapshot / OfferVersion 改变、撤回或失效 | Java 最终校验返回 `DATA_CHANGED`；不静默使用旧价，也不自动重试 LLM |
-| 生成开始后用户取消 | Browser 终止连接，Java 尽力取消下游并记录最终状态 |
+| 生成开始后用户取消 | Browser 终止连接，Java 尽力取消下游；provider-started request 仍计 quota，未知 usage / 执行状态保留 reservation 并 reconciliation |
 | `delta` 含未经验证的价格或事实 | UI 只将经 Java 校验的 `result` 显示为权威推荐卡片 |
 | Mock timeout / invalid output / no candidates | 返回可区分的错误或空结果，目录继续可用 |
 | 普通 token 调用 admin API，AI read token 调用 ingestion write API | 返回拒绝；无数据变更 |
 | 发布新版本或撤回来源 | Current candidate 更新，旧缓存不可继续作为有效候选 |
 | Redis 重启、Java 重启、MySQL container 重建 | 按 persistence contract 恢复；业务事实不依赖 Redis 存活 |
 
-Mock provider 提供显式 scenario，例如 normal、timeout、invalid ID、invalid schema；测试通过 request fixture 选择，不把可操控测试开关暴露到 production 用户 API。
+Mock provider 提供显式 scenario，例如 normal、timeout、invalid ID、invalid schema、provider-started crash、delayed cancellation 和 unknown usage；测试通过 request fixture 选择，不把可操控测试开关暴露到 production 用户 API。
+
+### 9.1 身份、人机验证与 abuse 验收
+
+| 场景 | 预期结果 |
+| --- | --- |
+| 匿名访问目录、推荐 stream、AI overview cache miss | 目录可读；付费路径返回 `401 AUTH_REQUIRED`；公开 overview cache miss 返回未就绪；provider invocation 为 0 |
+| 未验证邮箱、disabled 用户、expired / wrong issuer / wrong audience / ID token 调用 AI | 分别命中邮箱、账户或身份拒绝；不执行 Siteverify 后的付费流程 |
+| 用户 A 读取 B 的 Conversation、messages、request 或结果 | 不可访问，不泄漏资源存在性；无跨用户 cache 命中 |
+| 登录后返回原页面或 token 过期后重新登录 | 草稿可恢复；由用户再次确认发送，不自动消耗额度 |
+| Turnstile 缺失、失败、过期、复用、hostname / action mismatch | `BOT_VERIFICATION_FAILED`，provider invocation 为 0，可保留草稿重新验证 |
+| Siteverify timeout / 不可用 | `BOT_VERIFICATION_UNAVAILABLE`；不放行新 AI；目录仍可用 |
+| 同 idempotency key 并发提交或网络重试，以及重复 internal stream / claim | 同 payload 返回同 request；只有一个 verifier 与成功 claim，最多一次 provider dispatch；不同 payload 返回 conflict，未知 claim 不自动重发 |
+| 2000 Unicode code points / 32768 bytes 边界及超限，包含 emoji 与多字节文本 | 前后端字符计算一致，body 读取过程中即限长；超过限制拒绝，不调用 provider，不将完整异常正文写日志 |
+| Prompt injection 诱导跨用户查询、改价、写入或任意 tool 调用 | Java scope / candidate / ownership / final validation 继续生效 |
+| HTTP error 与 SSE 中途 error | 建流前返回 JSON error；建流后发 `error` + `done`；UI 不把 HTML challenge 当 SSE result |
+| 用户注销、重复 logout、服务端 logout 失败或账户被禁用 | revoke / disable 持久化且重复 logout 幂等；失败不虚报服务端已撤销，复制的旧 access token 在成功 revoke 后不能访问私人 API |
+
+### 9.2 跨实例并发验收
+
+以下是发布前必须完成的测试规格，尚无运行结果；初始阈值是设计值，不代表吞吐承诺。每例记录 config version、request IDs、provider call trace 与 ledger 前后状态。
+
+| 场景 | 必须证明的结果 |
+| --- | --- |
+| 50 个不同已验证用户同时发起请求，经 2 Java + 2 AI，mock provider 持续在途 | 共享 global / provider active 上限均为 5；其余收到受控 capacity rejection，无无限 queue |
+| 同一用户 10 个 tabs 同时用不同 key 请求 | 最多 1 个 active request；其余为 user concurrency / rate rejection，不超卖 quota |
+| 同一用户相同 key / payload 并发 20 次，混合两个 Java instances | 最多 1 次 provider invocation；重复请求只读已有状态 |
+| 前一轮已终止后发起每分钟第 6 次尝试；跨多个分钟完成 UTC 日第 20 个 provider-started attempt 后再请求 | 分别独立验证 rate / daily quota，避免被 active-slot limit 掩盖；拒绝本身不触发 provider |
+| 全局 token budget 接近耗尽，多个用户同时预留 | 仅原子满足完整 token 上界的请求可启动；余额非负，不按 output 为零假设放行 |
+| Redis 停止 / 重启，Java / AI rollout 或 crash | 所有存活 instances 仍使用同一 MySQL ledger；不重置每日额度、不重复 provider 调用 |
+| MySQL 不可用或 transaction 冲突重试耗尽 | 拒绝新付费请求；内部 retry 有界且不重复付费调用 |
+| Cancel、provider timeout、lease 失效、usage 回报重复或乱序 | reservation 不提前释放，结算幂等；unknown 状态进入 reconciliation，不能当作免费失败 |
+| 请求跨 UTC 午夜、同 conversation 并发编辑 | quota bucket 归属不变，active slot 不重置；conversation version 防止两轮历史交错 |
+
+Load tests 只针对隔离 mock provider；真实 provider、Cognito、Cloudflare 只运行低量 integration smoke。不能把本地 50 用户测试当作第三方服务的压力测试授权。
 
 ## 10. 真实 provider 与 staging 验证
 
@@ -241,7 +331,9 @@ Mock provider 提供显式 scenario，例如 normal、timeout、invalid ID、inv
 
 原始来源资料只有在使用条件允许外部 inference 时才发送给真实 provider；可以仅发送经过允许的必要结构化事实。真实 provider 失败不能使目录和普通筛选不可用。
 
-Cognito、S3、ALB SSE、IAM、ECS service discovery、migration job、backup / restore 在 staging 验证，按照[AWS 要求](aws-requirements.md)保存证据。本地通过不代替云端验收。
+Cognito managed login / signup / email verification、真实 Turnstile widget 与 Siteverify、Cloudflare WAF / rate rules、ALB origin isolation、SSE、S3、IAM、ECS service discovery、migration job、backup / restore 在 staging 验证，按照[AWS 要求](aws-requirements.md)保存证据。本地通过不代替云端验收。
+
+Staging smoke 必须检查 direct ALB hostname / IP 绕过被拒绝、错误 origin secret / Host 被拒绝、真实 client IP 只从可信代理链读取、API / SSE 不收到 Managed Challenge HTML，以及私人响应不被 edge cache。Cognito hosted domain 并不自动受到应用 Cloudflare zone 的保护；其 AWS WAF 和 identity protections 另行验证。真实 key 与 secret 分环境管理，staging 通过不能证明 production 已完成相同配置。
 
 ## 11. 故障排查与数据保留
 
@@ -255,6 +347,10 @@ Cognito、S3、ALB SSE、IAM、ECS service discovery、migration job、backup / 
 | AI 找不到 Java | 当前为 host 还是 container profile，内部 URL 与 service credential 是否匹配 |
 | 修改 seed 后看不到变化 | Dataset version、batch 状态、是否真正 publish、current pointer 和 cache namespace |
 | 地理范围结果异常 | 经纬度顺序、SRID、单位、门店坐标来源；直线距离不当成步行时间 |
+| 已登录仍返回 `AUTH_REQUIRED` / 邮箱未验证 | Access token 类型、issuer / app client、expiry、可信 profile 同步与 account 状态；不要改为信任 browser flags |
+| Turnstile 一直失败 | Mode、sitekey / secret 是否配套、hostname / action、token expiry 与重复消费；仅记录错误码，不输出 token |
+| AI 长期 busy 或额度未回收 | MySQL reservation、lease owner、provider-started 状态、reconciliation backlog；不要直接清空全部 ledger |
+| 多 replicas 后超卖 quota | 是否误用 process counters、是否共用同一 DB / bucket、unique constraints 与 transaction 边界 |
 
 常规关闭使用保留 volumes 的操作。任何 reset command 必须显示将删除的 Compose project、database、volumes 和本地目录，并拒绝非 local 环境及未知目标；不能执行系统范围的 Docker prune。
 
@@ -268,14 +364,21 @@ Cognito、S3、ALB SSE、IAM、ECS service discovery、migration job、backup / 
 - [ ] Raw files、env、exports、database internals 不进入 Git；可分发 fixtures 有 manifest。
 - [ ] 同一批导入可重复执行，发布与撤回影响候选和缓存。
 - [ ] 菜品预算、未知禁忌、OfferVersion、SSE、取消与失败路径通过测试。
+- [ ] 匿名 / 未验证 / disabled / 跨 owner 请求受拒绝；所有新付费生成路径都经过相同 gate。
+- [ ] Turnstile mock、官方 test keys 与 staging live keys 的证据分别记录，non-local bypass 启动检查通过。
+- [ ] 2 Java + 2 AI shared-ledger 测试证明 global / user / provider limits、idempotency、budget 与 recovery，不以单进程测试代替。
+- [ ] Cloudflare origin isolation、可信 client IP、private no-store 与 Cognito 独立防护有 staging 证据。
 - [ ] 单个真实 provider 的 smoke evidence 与 mock test results 分开记录。
 - [ ] 所有未验证项保留未完成状态，不以文档存在代表功能完成。
 
 ## 13. 官方参考
 
-核对日期：2026-10-28。具体 development topology、command names 与 auth profiles 是项目设计决策。
+既有 toolchain 参考沿用 2026-10-28 核对记录；新增 Turnstile 参考核对日期为 2026-11-05。具体 development topology、command names、quota 数值与 auth profiles 是项目设计决策。
 
 - [Docker Compose networking](https://docs.docker.com/compose/how-tos/networking/)：service-name discovery 与 container networking。
 - [Docker volumes](https://docs.docker.com/engine/storage/volumes/)：persistent named volumes 与生命周期。
 - [Next.js rewrites](https://nextjs.org/docs/app/api-reference/config/next-config-js/rewrites)：同源 proxy 的实现基础；SSE 行为仍需针对实际版本测试。
 - [Spring Boot system requirements](https://docs.spring.io/spring-boot/system-requirements.html)：JDK / build tool 要求与第三方 dependency 兼容提醒。
+
+- [Cloudflare Turnstile testing](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)：官方 test keys 及测试范围。
+- [Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)：Siteverify、token 期限与一次性语义。
