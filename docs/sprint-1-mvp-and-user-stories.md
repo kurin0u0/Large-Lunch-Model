@@ -1,11 +1,11 @@
 # Large-Lunch-Model：Sprint 1 MVP、用户流程与 User Stories
 
-- 版本：v0.2；更新日期：2026-11-06（Australia/Sydney）。
+- 版本：v0.3；更新日期：2026-11-26（Australia/Sydney）。
 - 开发方式：一人开发，使用 AI 辅助实现与 review。
 - 文档用途：明确第一轮产品范围，作为后续 issues、API contracts、implementation tasks 和验收的依据。
 - 当前状态：需求方案，尚未实现；本文件不代表网站已经上线、数据已收集或 provider 已验证。
-- 相关文件：[技术栈与 API contract](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[AWS 要求](aws-requirements.md)、[本地开发要求](local-development.md)、[交付规划](delivery-model-comparison-au-us-cn.md)。
-- 用户已确认：保留 ECS Fargate；本次将注册登录后使用 AI chat、流量限制、并发控制和 Cloudflare 防护纳入首轮要求。预算为 `MENU_SUBTOTAL`，配送费与平台 service fee 另列。
+- 相关文件：[技术栈与 API contract](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[VPS 与 Cloudflare 部署要求](deployment-requirements.md)、[本地开发要求](local-development.md)、[交付规划](delivery-model-comparison-au-us-cn.md)。
+- 用户已确认：采用 **VPS + Docker Compose + Cloudflare（Tunnel / WAF / Turnstile / R2）**，移除 AWS 依赖；身份认证采用 **Spring Boot 自建闭环（Spring Security 6 + 双 Token + Redis + MySQL + 邮箱 6 位验证码）**，并将注册登录后使用 AI chat、流量限制、并发控制和 Cloudflare 防护纳入首轮要求。预算为 `MENU_SUBTOTAL`，配送费与平台 service fee 另列。
 - 本版取代早期 draft 中“匿名聊天”“账号后做”“聊天只保留当前 tab”和“单道菜参考价就是预算”的假设；多 provider、收藏等仍属于后续。本文定义用户行为与验收，详细安全状态、阈值和 API 以技术栈 contract 为准。
 
 ## 1. 本轮要做成什么
@@ -25,7 +25,7 @@
 | 饭店详情页有 AI review | 用户已确认：根据菜单、价格和门店资料生成 AI 概览与推荐理由 |
 | 与 AI 聊天获得推荐 | 注册、确认邮箱并登录后使用固定 model；推荐真实门店 / 菜品并链接到共用详情页 |
 | 并发与流量从首轮开始考虑 | 跨实例 admission control、用户配额、全局 provider / token 上限、可理解的拒绝与恢复状态 |
-| Cloudflare 人机验证与防护 | Turnstile server-side validation、edge WAF / rate limiting、origin 防绕过；Cognito 入口另行保护 |
+| Cloudflare 人机验证与防护 | Turnstile server-side validation（统一保护认证与 AI 入口）、edge WAF / rate limiting、Cloudflare Tunnel 零公网业务端口防源站绕过 |
 | 第一轮不做多个 AI 或不同建模 | 不提供 model / Persona / Skill 切换；不做多 agent 协作、训练或 fine-tuning |
 
 ### 1.2 为了可执行而提出的默认方案
@@ -34,7 +34,7 @@
 
 - 初期覆盖悉尼 CBD 及少量选定区域，与原项目基线一致；界面明确数据覆盖范围。
 - 浏览、搜索、详情、地图与平台跳转可以匿名使用；AI chat 与任何新付费 AI generation 必须通过注册登录、邮箱确认、当前账号状态、Turnstile 与额度检查。
-- 使用 Cognito managed login + Authorization Code with PKCE，不自行维护密码；最小账号与私人会话属于首轮，收藏、复杂个人资料和历史搜索后续再做。
+- 使用 Spring Boot 自建站内注册 / 邮箱 6 位验证码 / 登录 / 找回密码（Spring Security 6 + 双 Token + BCrypt + Redis + MySQL），无需跳转第三方托管域名；最小账号与私人会话属于首轮，收藏、复杂个人资料和历史搜索后续再做。
 - 使用人工整理并审核的 seed catalog；不依赖先做 crawler、OCR 或完整 Admin UI。
 - 首轮使用一个 provider 和一个 model，门店概览与聊天只是同一 AI service 的两个任务。
 - 外卖定义为 `delivery`，跳转外部平台；自取 `pickup` 不在本轮模式范围内。
@@ -67,7 +67,7 @@
 ### 2.2 流程 B：AI 辅助选择
 
 1. 打开网站，进入“与 AI 聊天”；未登录时展示注册 / 登录入口，可保留本地未发送草稿。
-2. 完成 Cognito 注册、邮箱确认与登录；返回聊天后由用户主动发送，不能自动提交草稿或启动付费请求。
+2. 完成站内邮箱 6 位验证码注册与登录；返回聊天后由用户主动发送，不能自动提交草稿或启动付费请求。
 3. 如果 mode 未确定，AI 可以解释选择或展示堂食 / 外卖按钮，由用户确认；不擅自替用户选定。
 4. 用户描述需求并发送；Turnstile 完成验证，Java 校验当前身份、配额与并发后才允许新一轮 AI 调用。缺少明确 mode / budget 等必填项时可先使用普通表单澄清；需要 model 处理的澄清也计入同一套配额。
 5. 页面展示本次使用的 mode、区域和筛选条件，以及真实推荐卡片。
@@ -114,7 +114,7 @@ flowchart TD
 | 门店详情 | `/restaurants/{branch_id}` | 门店资料、AI 概览、菜单搜索、导航 / 平台按钮 |
 | 菜品详情 | `/menu-items/{menu_item_id}` | 菜品事实、来源、当前 mode 的价格信息、返回门店 |
 | AI 聊天 | `/chat`、`/chat/{conversation_id}` | 登录门槛、私人会话、当前条件、推荐卡片、验证 / 配额状态、停止与重试 |
-| 账号入口 | 登录跳转、OIDC callback、账号状态区 | Cognito managed login / 注册 / 邮箱确认 / 密码恢复；本地页面不收集或存储 Cognito 密码 |
+| 账号入口 | `/login`、`/register`、`/forgot-password` 与顶部账号状态区 | 站内表单完成邮箱 6 位验证码注册、登录、找回密码与退出；Access Token 存内存，Refresh Token 走 HttpOnly Cookie |
 
 这里的“饭店”在页面上对应具体 **Branch**。同一品牌的不同门店可以有不同菜单、价格、地址和外卖链接；不能只用品牌名称作为跳转依据。
 
@@ -410,21 +410,21 @@ MySQL 中的共享 admission ledger 是跨 Java / AI 实例的权威：同一短
 **作为想使用 AI 选餐的用户，我希望能完成注册和登录，并理解访问条件，以便在有配额保护的账号下使用聊天。**
 
 - AC1：匿名用户能正常浏览、搜索和使用地图 / 平台链接；AI 入口明确要求注册登录，不能先启动模型再显示登录弹窗。
-- AC2：通过 Cognito managed login 完成注册、邮箱确认、登录和密码恢复；OAuth callback 校验 state / nonce，使用 Authorization Code + PKCE。业务 API 只接受 Cognito access token，拒绝 ID token、错误 issuer / client、过期或无效签名。
-- AC3：Java 从可信 Cognito 属性确认邮箱与 `Enabled` 状态，并检查本地应用账号状态；不能信任浏览器传来的邮箱确认标志。无法确认当前状态时拒绝新付费请求。
-- AC4：登录回跳恢复原路由、mode、条件和当前草稿，由用户主动确认发送；不自动提交、回放或替其他账号发送旧消息。
-- AC4a：未发送草稿可在当前 tab 的 sessionStorage 短期保留以完成 redirect；退出 / 切换账号时清除。tokens 不落入该存储，完整历史通过 owner-scoped API 恢复，OAuth URL 不携带聊天正文。
-- AC5：登录失败、邮箱未确认、确认码过期 / 重发被限流等情况有清晰指引；UI 不展示 token、密码或内部错误。账号注册不能自动获得 admin 权限。
-- AC6：Cognito 托管域名和 API 有独立的 AWS WAF / throttling 防护；不能将应用页的 Turnstile 当成 Cognito 直接注册入口已受 Cloudflare 保护的证据。
-- 验证：managed login staging flow、直接 API 未认证 / ID token / 假 verified flag 拒绝、邮箱确认状态刷新、login return 草稿；依赖 S1-E03、S1-E06、S1-E07。
+- AC2：通过站内表单（`/register`、`/login`、`/forgot-password`）完成邮箱 6 位验证码注册、登录与密码重置；发送验证码、注册、找回密码与高风险登录均执行 Turnstile 服务端验证与 Redis 冷却/限次。密码由 Spring Security `BCrypt` 哈希落库，绝不明文保存或写日志。业务 API 只接受服务端签发的有效 Access Token JWT（`token_use=access`），拒绝过期、篡改或无效签名，Refresh Token 通过 `HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth` Cookie 传输并启用轮换与重放检测。
+- AC3：Java 从本地 MySQL `users` 表权威核对 `status=ACTIVE` 与 `email_verified=true`；绝不信任浏览器传来的 `user_id`、角色或邮箱确认标志。无法确认当前状态时拒绝新付费请求。
+- AC4：登录完成后返回原聊天路由，恢复 mode、条件和当前未发送草稿，由用户主动确认发送；不自动提交、回放或替其他账号发送旧消息。
+- AC4a：未发送草稿可在当前 tab 的 `sessionStorage` 短期保留；退出 / 切换账号时清除。Access / Refresh Token 不落入 `localStorage` 或 `sessionStorage`，完整历史通过 owner-scoped API 恢复，URL 不携带聊天正文或 token。
+- AC5：登录失败、验证码错误/过期、发码冷却、邮箱未验证或账号被禁用等情况有清晰指引；UI 不展示 token、密码或内部错误。普通账号注册只授 `ROLE_USER`，绝不能自动获得 admin 权限。
+- AC6：所有 `/api/v1/auth/*` 入口位于自家域名下，与 AI 接口统一处于 Cloudflare WAF、Rate Limiting 与 Turnstile 防护之下，并经 Cloudflare Tunnel 接入 VPS 内网。
+- 验证：站内注册（Mailpit 本地 / 真实发信 staging）、发码冷却与错次作废、Refresh Token 轮换与旧 Token 重放撤销整条 family、直接 API 未认证 / 假 verified flag 拒绝、登录后草稿恢复；依赖 S1-E03、S1-E06、S1-E07。
 
 ### S1-US17：退出、session 失效或账号禁用时停止私人访问
 
 **作为已登录用户，我希望退出后账号内容与 AI 权限及时失效，以便共享设备或 session 变化时保护自己的数据与配额。**
 
-- AC1：正常退出先调用 `POST /api/v1/auth/logout`，Java 持久化当前可信 `origin_jti` token family 的撤销状态，再由 OIDC client revoke / logout 并清理内存 token、私人 query cache 与草稿。server 调用失败也清除本地敏感状态，并提示服务端撤销未确认；不能声称 server logout 已完成。仅对当前 token family 的 logout 重试，在 JWT 其他验证仍有效时允许返回幂等成功；这不恢复私人读取或 AI 权限。
-- AC2：Java 对每个 private API 校验 owner、当前应用账号和 session 撤销状态；旧 access JWT 即使签名和 expiry 尚有效，也不能在 server logout 后继续查询私人会话或启动新生成。
-- AC3：过期、撤销或禁用状态返回明确错误与登录 / 浏览入口；旧用户私人内容不能短暂展示给随后登录的另一个账号。新付费调用还必须通过当前 Cognito 状态检查。
+- AC1：正常退出调用 `POST /api/v1/auth/logout`，Java 在 MySQL 持久化当前 `auth_session` 的撤销状态并在 Redis 写入撤销键、清除 Refresh Cookie；前端清理内存 Access Token、私人 query cache 与草稿并广播给其他 tab。server 调用失败也清除本地敏感状态，并提示服务端撤销未确认；不能声称 server logout 已完成。重复 logout 幂等返回成功，不恢复私人读取或 AI 权限。
+- AC2：Java 对每个 private API 校验 JWT、Redis 撤销状态（Redis 不可用时回查 MySQL `auth_session` 与 `users`）、当前账号状态与 owner；旧 Access JWT 即使签名和 expiry 尚有效，也不能在 logout、密码重置或禁用后继续查询私人会话或启动新生成。
+- AC3：过期、撤销、密码重置踢下线或禁用状态返回明确错误与登录 / 浏览入口；旧用户私人内容不能短暂展示给随后登录的另一个账号。新付费调用还必须通过本地 MySQL 账号与邮箱验证状态检查。
 - AC4：退出、禁用或 session 到期后不得接受新的 turn；已开始的请求尽力取消并按 provider 实际状态结算，未知 usage 不立刻退还。普通目录继续可用。
 - AC5：跨 tab 的本地登出通知可提升 UX，但不能代替 server 拒绝；相同用户重新登录也不能因 token 更新而重置用户配额。
 - 验证：logout 后重放旧 JWT、跨 tab、到期、账号禁用、切换账号及进行中请求退出；依赖 S1-US16、S1-E06、S1-E08。
@@ -451,8 +451,8 @@ MySQL 中的共享 admission ledger 是跨 Java / AI 实例的权威：同一短
 | S1-E03 | 运行环境与 CI/CD | 本地启动、容器 build、自动检查、staging、HTTPS 发布路径、健康检查 | 真实可访问网站 |
 | S1-E04 | 固定 model 的 AI service | 一个 adapter、两个任务 prompt、structured output、证据校验、timeout / cancel、usage 与限额 | AI 概览、聊天 |
 | S1-E05 | Release 验证与运行支持 | 关键 E2E、live smoke、外链人工检查、日志关联、告警与恢复步骤 | 首轮试用发布 |
-| S1-E06 | Identity 与私人数据 | Cognito managed login / PKCE、邮箱确认、当前账号与 AuthSession 撤销、owner-scoped conversations、private cache 规则 | US14–18 |
-| S1-E07 | Edge 与人机验证 | Cloudflare proxied WAF / rate limiting、origin 防绕过、Turnstile server validation、Cognito regional AWS WAF、secret 轮换 | US01、US13、US14、US16 |
+| S1-E06 | Identity 与私人数据 | Spring Security 6 + 双 Token（Access JWT + Refresh Cookie 轮换）、BCrypt、邮箱 6 位验证码（Redis + Resend/SMTP）、AuthSession 撤销与密码重置全端下线、owner-scoped conversations、private cache 规则 | US14–18 |
+| S1-E07 | Edge 与人机验证 | Cloudflare proxied WAF / rate limiting、Cloudflare Tunnel 零公网业务端口防绕过、Nginx 屏蔽内部/文档路径、Turnstile server validation（覆盖认证与 AI）、密钥轮换 | US01、US13、US14、US16 |
 | S1-E08 | 跨实例 admission 与成本限制 | MySQL ledger、atomic quota reservation、全局 / provider / user slots、idempotency、cancel / crash reconciliation、2 Java + 2 AI mock load test | 所有新付费 AI 调用 |
 
 ### 7.1 首批数据最低要求
@@ -467,7 +467,7 @@ MySQL 中的共享 admission ledger 是跨 Java / AI 实例的权威：同一短
 | MenuSnapshot / source | 来源地址或文件、采集 / 审核时间、版本、发布与失效状态 |
 | ExternalLink | Branch、平台名称、HTTPS URL、核验时间、有效状态 |
 | AI summary | Branch、mode、证据版本、model / prompt version、source references、生成状态 / 时间 |
-| User / AuthSession / Conversation / ChatMessage | Cognito subject 映射、账号与 token-family 撤销状态、owner、version、消息与 retention；无密码 / 原始 token 存储 |
+| User / UserRole / AuthSession / Conversation / ChatMessage | 规范化邮箱、BCrypt 哈希、RBAC 角色、双 Token 会话与 token-family 撤销状态、owner、version、消息与 retention；无明文密码 / 原始 Refresh Token 存储 |
 | Recommendation request / Admission / Quota | request ID、owner、conversation、idempotency scope / payload hash、query context、候选版本、实际 model、reservations / usage、terminal / reconciliation 状态 |
 
 这是一份 contract checklist；确切字段与 retention 以[数据要求](data-requirements.md)为准。聊天内容为恢复功能按限定期限保存在私人业务记录中，不进入普通日志；精确位置不默认长期保存。raw / source / 私人内容分别遵守各自权限与删除要求。
@@ -476,8 +476,8 @@ MySQL 中的共享 admission ledger 是跨 Java / AI 实例的权威：同一短
 
 | 模块 | 首轮负责内容 |
 | --- | --- |
-| Next.js / React | 目录与私人页面、OIDC client、Turnstile UI、mode / query state、streaming、错误 / 配额提示、返回恢复 |
-| Java / Spring Boot / MyBatis | 目录、过滤、最终事实与版本验证、identity / owner、Siteverify、atomic admission、quota / usage reconciliation、私人业务记录 |
+| Next.js / React | 目录与私人页面、站内登录/注册/找回密码表单、内存 Access Token + 无感刷新、Turnstile UI、mode / query state、streaming、错误 / 配额提示、返回恢复 |
+| Java / Spring Boot / Spring Security / MyBatis-Plus | 目录、过滤、最终事实与版本验证、自建认证与邮箱验证码、Siteverify、atomic admission、quota / usage reconciliation、私人业务记录 |
 | FastAPI / Python | 一个 model adapter、门店概览任务、聊天任务、受控只读 tools |
 | Data preparation | 手工整理 / 导入脚本、审核、来源、菜单版本和链接维护 |
 | CI/CD / Operations | checks、build、deploy、配置 / secrets、日志、健康检查和恢复 |
@@ -521,7 +521,7 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 | 距离排序 | 参考点与门店坐标 | 固定坐标计算与 permission UI | 用户定位 / 手动点 + 实际排序 |
 | 外卖跳转 | 已核验的具体门店链接 | 缺失链接状态与按钮 UI | 对外目录中的真实 HTTPS URL |
 | AI 概览 | 当前资料、来源、model access | schema 校验、缓存状态、mock 输出 | 一个真实 provider 生成且通过事实检查 |
-| AI 聊天 | 候选查询、共享 filters、identity、Turnstile 与共享 admission contract | mock provider、mock / test challenge 与对话 UI | managed login、live Siteverify、真实 provider、Java 校验和完整点击路径 |
+| AI 聊天 | 候选查询、共享 filters、identity、Turnstile 与共享 admission contract | mock provider、mock / test challenge、Mailpit 与对话 UI | 真实邮箱验证码注册登录、live Siteverify、真实 provider、Java 校验和完整点击路径 |
 | 上线 | 可部署 artifacts、环境权限、配置 | 本地 build 与 CI | 可访问站点、smoke 和日志 |
 
 先上最薄浏览路径，能尽早发现部署和数据问题。不要等所有页面和 AI 功能写完才第一次部署。
@@ -561,9 +561,9 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 - Python 使用 mock provider 检查 schema、证据引用、timeout 与取消。
 - 常规 CI 不依赖真实模型；发布前执行受控 live smoke，确认实际启用 provider 可用。
 - 关键配置、模型 key、Turnstile secret 与外部服务凭证保留在服务端；所有新付费 AI 调用共享 verified login、challenge、速率、active slots、token 和日配额限制。
-- Cloudflare edge 验证实际 host / route 规则及 origin 防绕过；Cognito managed login / API 通过关联 regional AWS WAF 防护。Cloudflare WAF 不能保护未经过该 zone 的 Cognito 域名；能力与规则依实际 plan 验证。[AWS Cognito WAF](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-waf.html)
+- Cloudflare edge 验证实际 host / route 规则、Cloudflare Tunnel 零公网业务端口与 Nginx 屏蔽内部/文档路径；认证接口 `/api/v1/auth/*` 与 AI 接口统一受同一套 Cloudflare WAF / Rate Limiting 与 Turnstile 保护，能力与规则依实际 plan 验证。
 - 高并发与 fault injection 在隔离 local / CI 环境使用 2 Java + 2 AI、共享 MySQL 与 barrier mock provider，使各请求在测试期间真实重叠；记录配置版本、副本数、负载、admission / denial、延迟和 provider-start 数。50 / 10 / 20 场景不在公网关闭验证来执行。
-- ECS Fargate staging 使用至少 2 个 Java / 2 个 AI replicas 进行少量 live Turnstile 与真实 provider smoke，保持 verified login、challenge 和 admission gates；不以第三方服务作为大规模压测目标。
+- VPS staging 可按 Compose multi-replica override 临时起 2 Java + 2 AI 进行少量 live Turnstile 与真实 provider smoke，保持 verified login、challenge 和 admission gates；不以第三方服务作为大规模压测目标。
 - staging 与 production 使用兼容的 schema；部署记录包括应用版本、数据 / 菜单版本及 prompt / model 配置。
 - 修改 Prompt 或菜单来源也要触发相关 validation；它们会改变用户看到的结果。
 
@@ -597,8 +597,8 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 | AT22 | 日额度 / token 额度边界、UTC 午夜、长请求跨日 | atomic reservation 无负值与超卖；跨日请求仍归原 quota bucket，active slot 不随午夜清空 |
 | AT23 | Redis 故障、MySQL 故障、进程崩溃、取消与 rolling deploy | Redis 故障不丢额度；MySQL admission 不可用时拒绝新付费调用；未知 usage / provider 状态不因 lease 到期而直接释放 |
 | AT24 | 两个用户互换 Conversation / Request IDs；两个 tab 同时更新 | 跨 owner 404，private no-store；版本冲突不覆盖会话、不启动第二次调用 |
-| AT25 | 直接 ALB / origin 地址、伪造转发 headers、Cloudflare 其他 zone | origin 不可绕过；合法 zone 路径可用；真实客户端 IP 只来自可信代理链 |
-| AT26 | staging live Turnstile / Cognito WAF；local mock / test keys 被误部署 | live integration 通过；staging / production 拒绝 local auth、mock challenge 和 test credentials；SSE 不被 HTML challenge 截断 |
+| AT25 | 直接扫描或访问 VPS 公网业务端口、伪造转发 headers、访问 `/internal/*` / `/actuator/*` / `/swagger-ui*` | VPS 公网 80/443/3000/8080/8000/3306/6379 均不可达；仅 Tunnel 路径可用；内部与文档路径返回 404；真实 IP 只来自可信代理链 |
+| AT26 | staging live Turnstile / 真实邮箱发码；local mock / test keys 或 `AUTH_COOKIE_SECURE=false` 被误部署 | live integration 通过；staging / production 拒绝 mock / test challenge 与不安全 Cookie 配置；SSE 不被 HTML challenge 截断 |
 
 ### 10.3 Release checklist
 
@@ -611,8 +611,8 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 - [ ] 关键 tests / build / deployment checks 通过，日志可关联 request ID。
 - [ ] 注册、邮箱确认、登录、logout 撤销、当前账号状态与 owner isolation 的拒绝路径通过。
 - [ ] 每个新付费 route（包括 overview refresh）执行 Turnstile 与相同 admission；匿名 cache miss 不触发 LLM。
-- [ ] 隔离 local / CI 的 2 Java + 2 AI 共享 ledger 测试证明配额 / 并发不超额，记录实测结果与配置；Fargate 多 replica 的少量 live smoke 保持所有 gates，local mock 不替代 live challenge / edge 检查。
-- [ ] Cloudflare WAF / rate limiting 与 origin 防绕过、Cognito 独立防护实际验证；任何 plan 限制与未启用规则明确记录。
+- [ ] 隔离 local / CI 的 2 Java + 2 AI 共享 ledger 测试证明配额 / 并发不超额，记录实测结果与配置；VPS staging 的少量 live smoke 保持所有 gates，local mock 不替代 live challenge / edge 检查。
+- [ ] Cloudflare WAF / rate limiting、Tunnel 零公网业务端口与 Nginx 路由拦截实际验证；任何 plan 限制与未启用规则明确记录。
 - [ ] 取消、崩溃、provider 状态未知、日边界和 rolling deploy 有安全 reconciliation；日志不包含 access token / Turnstile token / secret / 完整聊天。
 - [ ] 发布后有检查入口、使用限额、可执行 kill switch 和明确恢复方式。
 
@@ -628,7 +628,7 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 | 地图与参考点 | Google Maps directions + 预设点 / 可选定位 | 门店地址准确性、参考点列表 |
 | 外卖平台 | 只发布已核验的门店 HTTPS 链接 | 实际平台与分店 URL、更新负责人 |
 | AI | 一个固定 provider / model | 可用账号、能力、成本、timeout 与限额 |
-| 上线环境 | ECS Fargate + Cloudflare → ALB；本次不切换 Vercel / EC2 | 云账号、域名、Cloudflare plan / zone、Cognito / Turnstile live config 与 deploy 权限 |
+| 上线环境 | VPS + Docker Compose + Cloudflare（Tunnel / WAF / Turnstile / R2）+ Spring Boot 自建认证 | VPS 规格与地域、域名、Cloudflare plan / zone / R2、发信域名（Resend / SMTP）、Turnstile live config 与部署权限 |
 | 初始流量配置 | 本文第 5.3 节的保守可配置初值 | 用 mock load 和 bounded real smoke 校准；配置变更记录版本 |
 | Sprint capacity | 单人、一次一条主要 Story | 每周可用时间及本轮 commitment |
 
@@ -637,6 +637,6 @@ Python 通过 Java 的内部接口获取业务候选并提交需保存的结果�
 - [Google Maps URLs](https://developers.google.com/maps/documentation/urls/get-started)：可使用跨平台 Maps URL，不需要 Maps API key；directions 的结果可能在 app 或浏览器中打开。导航 URL 不会自动为本站提供 Google 门店目录、路线距离或实时交通数据。
 - [MDN — getCurrentPosition](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation/getCurrentPosition)：定位的 HTTPS、permission、timeout 和回调要求。
 
-Maps URLs、Geolocation、Turnstile server validation 与 Cognito WAF 官方资料于 2026-11-05 复核；具体配置及部署证据由 AWS / 本地文档约束。产品范围、页面组织、Story 拆分和初始限制是本项目的设计要求，不是已实现或已压测结论。
+Maps URLs、Geolocation、Turnstile server validation、Cloudflare Tunnel / R2 与 Spring Security 资料均已核对；具体配置及部署证据由部署与本地文档约束。产品范围、页面组织、Story 拆分和初始限制是本项目的设计要求，不是已实现或已压测结论。
 
-本次保留 S1-US01–15 的身份与用户价值，修正预算和匿名 AI 假设，新增 S1-US16–18 及 S1-E06–08。没有创建应用服务、账号、Cloudflare / AWS 资源或执行运行时验收。
+本次重构（v0.3，2026-11-26）保留 S1-US01–18 的全部用户价值、预算规则与并发安全底线，将基础设施从 AWS 精简为 VPS + Cloudflare，并将认证切换为 Spring Boot 自建邮箱验证码与双 Token 闭环。尚未创建应用服务、账号、Cloudflare / VPS 资源或执行运行时验收。

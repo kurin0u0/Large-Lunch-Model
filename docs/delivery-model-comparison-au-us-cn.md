@@ -1,12 +1,12 @@
 # Large-Lunch-Model：澳洲、美国、中国交付实践与团队组织对比
 
-- 版本：v0.3，供选择与讨论；安全、并发与首轮 User Stories 于 2026-11-06 同步。
-- 编写与来源核对日期：2026-10-27（Australia/Sydney）。
-- 项目基线：[tech-stack-requirements.md](../tech-stack-requirements.md)；专题要求：[数据](data-requirements.md)、[AWS](aws-requirements.md)、[本地开发](local-development.md)。
+- 版本：v0.4，供选择与讨论；2026-11-26 同步为 VPS + Cloudflare + Spring Boot 自建认证架构。
+- 编写与来源核对日期：2026-10-27（2026-11-26 同步架构基线，Australia/Sydney）。
+- 项目基线：[tech-stack-requirements.md](../tech-stack-requirements.md)；专题要求：[数据](data-requirements.md)、[VPS 与 Cloudflare 部署](deployment-requirements.md)、[本地开发](local-development.md)。
 - 用户已确认的预算口径：`MENU_SUBTOTAL`，包含所选规格、必选与已选可选加料和数量；配送费与平台 service fee 等订单级费用另列。本文中的费用与版本语义按技术基线执行。
 - 状态：本文是 operating model 建议，尚未选定团队组织、人员、Sprint 长度或上线日期；不代表 CI/CD 或产品功能已经实现。
-- 排期假设：以 6–8 人、可持续的接近全职投入为主要讨论场景。实际人数、经验、每周投入、AWS 资源和数据来源均待确认；兼职团队应按实际 capacity 缩小每轮范围。
-- 当前产品要求：保留 ECS Fargate；首轮 AI 必须注册登录、邮箱验证、Turnstile 与跨实例 admission。正式 Stories 见 [MVP 与 User Stories](sprint-1-mvp-and-user-stories.md)，本文件的团队人数与 Sprint 排期仍只是讨论方案。
+- 排期假设：以 6–8 人、可持续的接近全职投入为主要讨论场景。实际人数、经验、每周投入、VPS / Cloudflare 资源和数据来源均待确认；兼职或单人开发应按实际 capacity 缩小每轮范围。
+- 当前产品要求：采用 **VPS + Docker Compose + Cloudflare（Tunnel / WAF / Turnstile / R2）** 与 **Spring Boot 自建认证（Spring Security 6 + 双 Token + Redis + MySQL + 邮箱 6 位验证码）**；首轮 AI 必须注册登录、邮箱验证、Turnstile 与跨实例 admission。正式 Stories 见 [MVP 与 User Stories](sprint-1-mvp-and-user-stories.md)，本文件的团队人数与 Sprint 排期仍只是讨论方案。
 - 阅读顺序：先看第 1、3、4、13 节选择模式，再看第 5–12 节了解执行细节。
 
 ## 1. 当前最值得考虑的组织方式
@@ -122,7 +122,7 @@ DTA 的 [Service design and delivery 指导](https://www.digital.gov.au/policy/d
 
 **用户问题 → Epic / Story → owner 与 acceptance criteria → PR → pipeline → staging 验证 → release → 反馈。**
 
-现有基线已经选择 GitHub Actions 与 AWS。借鉴上述协作方法不要求更换成这些厂商的工具；也无需因一个小型软件产品而立即引入完整 IPD 流程。
+现有基线选择 GitHub Actions + GHCR + VPS Docker Compose + Cloudflare；同时 Java 后端在认证与工程规范上主动对齐中国大陆成熟的 Spring Boot 开发实践（Spring Security 6 + 双 Token + Redis + MySQL + 邮箱 6 位验证码 + MyBatis-Plus / 原生 XML + Flyway + 统一异常与 DTO/VO 分层）。借鉴上述协作方法不要求更换成特定厂商的平台工具；也无需因一个小型软件产品而立即引入完整 IPD 流程。
 
 ## 4. 你提出的五个组，怎样调整更合适
 
@@ -186,7 +186,7 @@ flowchart TD
 | E | Data Engineering + Content Operations | 首批审核数据、来源、导入校验 | B 共同处理业务落库；A 确认内容范围 |
 | F | Quality Engineering + Platform coordination | CI、E2E、staging、质量与发布证据 | 各代码 owner 编写并维护自身测试与部署配置 |
 
-F 的组合仅适合首轮范围受控、成员具备相应技能的情况。F 不独自包办全部测试、AWS 和运维。若 pipeline 或测试形成持续等待，应先重新分配职责，而不是继续扩大 F 的负担。
+F 的组合仅适合首轮范围受控、成员具备相应技能的情况。F 不独自包办全部测试、VPS / Cloudflare 部署和运维。若 pipeline 或测试形成持续等待，应先重新分配职责，而不是继续扩大 F 的负担。
 
 表中的 backup 也以实际技能为前提：E 只有具备 Java 能力才承担 Backend backup；否则应安排 pairing、培训或补充人手，不能因为写了一个名字就认为已有覆盖。首轮优先保住一条完整选餐路径；容量不足时，将目录浏览的完整交互和额外 UI 优化移出本轮。
 
@@ -239,14 +239,14 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 | --- | --- | --- | --- |
 | 落实已确认预算口径与交互 | Product / UX | MENU_SUBTOTAL、规格 / options、quantity、排除费用的展示 | 页面草图、测试场景 |
 | 提供审核后的菜品 fixture | Data | MenuItemRevision、OfferVersion、SourceRecord、snapshot、freshness | 人工数据准备与 backend 开发 |
-| 登录 / challenge / admission | Backend + Frontend + Platform | Cognito、Turnstile、owner、幂等、quota ledger 与错误 UX | local mock 与 cloud setup 可并行 |
+| 登录 / challenge / admission | Backend + Frontend + Platform | Spring Boot 邮箱验证码 + 双 Token、Turnstile、owner、幂等、quota ledger 与错误 UX | Mailpit 本地联调与 VPS/Cloudflare setup 可并行 |
 | 查询候选与最终规则校验 | Backend | budget contract、错误码、数据版本 | 用 fixture 完成 API 和测试 |
 | 生成解释与引用 | AI | 候选输入、structured output、provider capability | 先以 mock provider 验证 schema |
 | 展示输入与 streaming | Frontend | OpenAPI、SSE event、状态机 | 先对 mock API 开发 |
 | 验证用户路径与异常 | Quality + 全体 | acceptance criteria、同一组 fixtures | 从第一天设计 cases 与自动化 |
 | staging deployment | Platform + service owners | image、配置、secrets、环境权限 | 环境准备可与代码并行 |
 
-**硬 dependency**：字段含义和 schema 未约定，相关实现可能返工；真实 provider 验证需要可用凭证；AWS deployment 需要环境权限。
+**硬 dependency**：字段含义和 schema 未约定，相关实现可能返工；真实 provider 验证需要可用凭证；staging 部署需要 VPS / Cloudflare / 发信域名权限。
 
 **integration dependency**：Frontend 可先对 mock 开发，AI 可先对 fixture 开发，但 Story 完成必须证明真实服务链路集成。mock 通过不能替代真实集成。
 
@@ -262,24 +262,24 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 2. 明确成员、每周可用时间、专业 owner 和 backup，先确认 capacity 再承诺范围。
 3. 明确能合法使用的数据来源及更新方式，准备少量有来源的样本；首轮可手工整理。
 4. 按 framework 与数据要求落实最小 contract：MenuItemRevision、OfferVersion、SourceRecord、MenuSnapshot、MENU_SUBTOTAL、ingestion / review / publish，以及 User / AuthSession、Conversation、AIRequest、admission / quota、recommendation request/result 与 SSE events。
-5. 确认一个 provider、AWS staging / Cognito、Cloudflare zone / Turnstile 的 access、费用范围与 owner；记录可配置初始 limits，不把它们当成已测容量。
+5. 确认一个 provider、VPS staging、Cloudflare zone / Tunnel / R2 / Turnstile 与发信服务（Resend / SMTP）的 access、费用范围与 owner；记录可配置初始 limits，不把它们当成已测容量。
 6. 建立一个 backlog、轻量 PR review 约定和初版 Definition of Done。
 
 这些是建议的开工条件；本文没有创建云资源或申请 model API credentials。
 
 ### 7.2 Sprint 1 Goal
 
-这个示例以启动准备中的 AWS / provider access 已就绪、团队具备相应技能为前提。否则先根据可用条件制定实际 Goal，不直接承诺两周完成云端路径。
+这个示例以启动准备中的 VPS / Cloudflare / provider access 已就绪、团队具备相应技能为前提。否则先根据可用条件制定实际 Goal，不直接承诺两周完成线上路径。
 
-**在 Cloudflare 保护的受限 Fargate staging 上，匿名用户能使用基础目录；试用者完成注册、邮箱验证、登录与人机验证后，在共享配额与并发限制内，从有来源的菜单获得一个模型生成、经 Java 校验的推荐；该版本可由 pipeline 构建和部署。**
+**在 Cloudflare Tunnel 保护的 VPS staging 上，匿名用户能使用基础目录；试用者通过 Spring Boot 邮箱验证码完成注册、登录与人机验证后，在共享配额与并发限制内，从有来源的菜单获得一个模型生成、经 Java 校验的推荐；该版本可由 pipeline 构建并部署。**
 
 首轮范围建议：
 
 - 小规模、人工审核的真实 seed data；例如 5–10 家门店、30–50 个 MenuItems，仅作为规划量级，不代表已经收集。每个候选有有效且已发布的 OfferVersion；synthetic fixtures 只用于开发与明确标识的演示。
 - 一条核心选餐路径、一个 provider、一个 Persona、一个 Skill。
 - 最小 streaming、客户端取消及下游尽力取消，以及无候选、provider timeout、输出无效三类失败行为；不承诺断线自动续传。
-- Cognito 注册 / 登录 / 邮箱确认、退出与 session 撤销、私人会话 owner isolation；Java → Python 独立 service identity。完整个人资料与收藏可后续扩展，但 AI 登录门槛不能后移。
-- Cloudflare WAF / Turnstile、受限 origin、Cognito AWS WAF；API / SSE 不插入 HTML challenge。
+- Spring Boot 自建邮箱 6 位验证码注册 / 登录 / 密码重置、双 Token 轮换与退出撤销、私人会话 owner isolation；Java → Python 独立 service identity。完整个人资料与收藏可后续扩展，但 AI 登录门槛不能后移。
+- Cloudflare WAF / Rate Limiting / Turnstile（统一覆盖认证与 AI 接口）、Cloudflare Tunnel 零公网业务端口与 R2 存储备份；API / SSE 不插入 HTML challenge。
 - MySQL atomic admission、配置化 user / global / provider concurrency 与 daily quota、唯一 dispatch、取消 / crash reconciliation；首轮即覆盖 2 Java + 2 AI 的 mock load。
 - 保留输入预算、SourceRecord、MenuItemRevision / MenuSnapshot / OfferVersion、实际 model ID 与请求状态的最小记录。
 - 首轮以 Admin CLI 完成来源与门店 bootstrap、导入、审核和发布；资料过期在查询时排除，不等待自动 scheduler。
@@ -295,12 +295,12 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 | --- | --- | --- |
 | Day 1 | 对齐 Goal、acceptance criteria、contracts；建立可运行 repo 与最小 CI | 每人知道输入输出；首个 PR 能被自动检查 |
 | Day 2–3 | 同时推进 seed data、auth / admission、AI adapter、页面、staging 基础环境 | 本地以 fixture auth、challenge mock、mock provider 贯通第一条路径 |
-| Day 4–5 | 完成 admission 多实例测试后，接入一个真实 provider；验证 Cognito / live Turnstile | 真实候选、来源与收费前安全检查一起成立 |
-| Day 6–8 | 加入规则复核、错误路径、记录、staging deployment | pipeline 能部署；Quality 与 Product 开始使用实际版本 |
-| Day 9 | 权限 / 并发 / quota E2E、origin 防绕过、受控 live smoke 与恢复演练 | 对已完成范围有可复查证据 |
+| Day 4–5 | 完成 admission 多实例测试后，接入一个真实 provider；验证真实发信 / live Turnstile | 真实候选、来源与收费前安全检查一起成立 |
+| Day 6–8 | 加入规则复核、错误路径、记录、VPS Docker Compose staging deployment | pipeline 能部署；Quality 与 Product 开始使用实际版本 |
+| Day 9 | 权限 / 并发 / quota E2E、公网零端口防绕过、受控 live smoke 与 R2 备份恢复演练 | 对已完成范围有可复查证据 |
 | Day 10 | Review、用户反馈、Retrospective、调整下一轮 backlog | 展示完整用户路径；明确剩余风险与下轮改进 |
 
-若 AWS 或 provider 权限尚未就绪，应在 Sprint Planning 结束前设定与现有条件相符的 Goal。正式 Scrum 的 Sprint 开始后发现阻碍时，团队与 Product Owner 协商 scope 和实现计划，保持 Sprint Goal；若 Goal 已过时，由 Product Owner 决定是否取消 Sprint。未能实现 Goal 时应如实记录，只报告已经验证的本地、mock、云端或真实模型路径。[Scrum Guide](https://scrumguides.org/scrum-guide.html)
+若 VPS / Cloudflare 或 provider 权限尚未就绪，应在 Sprint Planning 结束前设定与现有条件相符的 Goal。正式 Scrum 的 Sprint 开始后发现阻碍时，团队与 Product Owner 协商 scope 和实现计划，保持 Sprint Goal；若 Goal 已过时，由 Product Owner 决定是否取消 Sprint。未能实现 Goal 时应如实记录，只报告已经验证的本地、mock、线上或真实模型路径。[Scrum Guide](https://scrumguides.org/scrum-guide.html)
 
 ### 7.4 Sprint 1 的 backlog 示例
 
@@ -321,7 +321,7 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 | Sprint | 目标 | 可选的主要增量 | CI/CD 与质量演进 |
 | --- | --- | --- | --- |
-| 1 | 证明受保护的最小选餐路径可运行 | 目录、登录 / 邮箱、Turnstile、admission、seed data、单 provider、Fargate staging | CI、schema / seed、owner / quota / 多实例 tests、关键 E2E、origin 验证 |
+| 1 | 证明受保护的最小选餐路径可运行 | 目录、Spring Boot 邮箱验证码登录、Turnstile、admission、seed data、单 provider、VPS + Cloudflare staging | CI、schema / seed、owner / quota / 多实例 tests、关键 E2E、零公网端口与备份恢复验证 |
 | 2 | 提高数据与推荐可信度 | 改善首轮已有的审核 / 更新流程和必要 UI；偏好保存或收藏二选一优先；按反馈完善未知信息处理 | migration 升级兼容性验证、规则回归、evaluation dataset v1 |
 | 3 | 验证角色与模型选择的价值 | Persona / Skill registry；第二个 provider；有证据再加入比较模式 | capability tests、partial failure、成本与 latency 对比 |
 | 4 | 验证小范围持续使用与运行能力 | 根据反馈优化体验、数据维护、运行监控；满足条件时进入受控 Beta | release promotion、恢复演练、告警、容量与使用反馈 |
@@ -334,20 +334,20 @@ Product Owner 负责价值与优先级，Tech Lead 主持技术边界与权衡�
 
 ### 9.1 与当前 architecture 对应的 pipeline
 
-基线继续采用 monorepo、GitHub Actions、Terraform、AWS ECS Fargate，新增 Cloudflare edge / origin 配置与 Cognito AWS WAF。可采用以下流程：
+基线采用 monorepo、GitHub Actions、GHCR、VPS Docker Compose + Nginx 与 Cloudflare（Tunnel / WAF / Turnstile / R2）。可采用以下流程：
 
 ```mermaid
 flowchart TD
     PR["小批次 PR"] --> CI["lint / type checks / unit / contract / build"]
     CI --> REVIEW["Code review + required checks"]
     REVIEW --> MAIN["合并 main"]
-    MAIN --> ART["构建不可变 images / ECR / release manifest"]
-    ART --> ST["部署 staging + compatible migrations"]
+    MAIN --> ART["构建不可变 images / GHCR / release manifest"]
+    ART --> ST["部署 VPS staging + 一次性 Flyway migration"]
     ST --> CHECK["smoke / E2E / AI evaluation"]
     CHECK --> READY["可发布版本"]
     READY --> DECIDE["按已选 release policy 决定发布"]
-    DECIDE --> PROD["将相同 images promote 到 production"]
-    PROD --> OBS["监控 / 反馈 / 必要时恢复"]
+    DECIDE --> PROD["将相同 image digests promote 到 production VPS"]
+    PROD --> OBS["监控 / 反馈 / R2 备份恢复"]
 ```
 
 图是拟议流程，仓库当前没有这些 workflow。production 是否自动发布，要在团队选择 operating model 后确定。
@@ -362,7 +362,7 @@ flowchart TD
 | Contracts | OpenAPI / SSE fixtures、producer / consumer 一致性 | Java 与 Python / Frontend 共同维护 | 最小请求、结果、错误 event |
 | Data | 必填字段、类型、重复 ID、引用完整性、来源与版本 | Data owner | 首批 seed data 的自动检查 |
 | E2E | 选餐主路径、无候选、provider 失败、取消 | Quality 协调，相关开发者修复 | 少量高价值路径；核对 Java → Python → provider 的取消与超时行为 |
-| Infrastructure | Terraform 检查与 plan review、部署健康检查 | Platform owner | Cloudflare / origin / Cognito WAF、secrets、Fargate 访问边界 |
+| Infrastructure | Compose / Nginx 配置检查、镜像扫描、部署健康检查与备份脚本验证 | Platform owner | Cloudflare Tunnel / WAF / R2、VPS 零公网业务端口、secrets 与容器内存边界 |
 | Concurrency / abuse | 2 Java + 2 AI 的隔离 mock load；50 用户 / 10 tab / 20 同 key、故障与 quota 边界 | Backend + AI + Quality | 先证明共享 ledger 不超卖；live provider 不做大规模 load test |
 | AI evaluation | 菜品真实性、规则违反、引用、结构化输出、latency / cost | AI + Quality + Product | mock regression 加受控 live 验证 |
 
@@ -384,9 +384,7 @@ flowchart TD
 - release manifest 记录三个应用的 image digest、migration version、Prompt / Skill 版本和相关数据版本；验证过的 image 直接 promote，避免重新构建得到不同内容。
 - 服务可独立构建，不代表任何版本组合都兼容。内部 API 与 event 的 breaking change 必须安排兼容窗口或协调发布。
 - Flyway migration 优先采用兼容性演进。应用 image 回退不自动意味着数据库可以安全回退；恢复方案要区分 application、schema 和 data。
-- AWS 身份按基线使用 OIDC 的短期 credentials，并限制可承担 role 的 repo、branch / environment；无需在本文提前填写 IAM policy。[GitHub OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
-
-GitHub 提供 [ECR / ECS deployment 示例](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/amazon-elastic-container-service)。实际配置还要核对服务参数和权限；如需 environment required reviewers，应检查 repo 可见性及 GitHub plan 的支持情况。[Deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+- GitHub Actions 推送镜像至 GHCR 使用受限 `GITHUB_TOKEN`（`packages: write`）；部署 VPS 使用独立受限 SSH deploy key（或 Tailscale 私有接入），并限制在特定 GitHub environment / branch 中使用，不可信 fork PR 禁止获取部署凭证。[Deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 
 ## 10. Data 与 AI 的工作方式
 
@@ -520,7 +518,7 @@ A 可以借鉴 DTA 的 discovery 和跨职能做法、US Playbook 的快速验�
 | 首批数据 | 来源、覆盖区域、更新者、审核者 | 决定推荐是否有事实基础 |
 | 团队组织 | 单一 cross-functional team，还是已有共享职能组 | 决定 backlog、dependency 和 ownership |
 | 交付节奏 | A、B、C 或有理由的组合 | 决定会议、优先级、release 管理方式 |
-| 基础资源 | AWS、provider access、预算、GitHub repo 条件 | 决定首轮能够验证到哪个环境 |
+| 基础资源 | VPS、Cloudflare（Tunnel / R2 / Turnstile）、发信域名、provider access、预算、GitHub repo 条件 | 决定首轮能够验证到哪个环境 |
 | 产品验收 | 谁参与试用，怎样判断有用 | 决定每轮是否获得有效反馈 |
 
 当前倾向供你评估：**先用一个 cross-functional team，明确专业 owner 与 backup；按实际人数选择 A 或 B；首轮交付 walking skeleton 与基础 CI/CD。** 等出现可独立的业务价值流或共享能力瓶颈，再决定拆分 squads。选择之后，下一步才是把方案落实为真实成员分工、首轮 issues 和 pipeline 配置。
@@ -544,6 +542,6 @@ A 可以借鉴 DTA 的 discovery 和跨职能做法、US Playbook 的快速验�
 | [华为云 — CodeArts 项目类型](https://support.huaweicloud.com/productdesc-devcloud/devcloud_pdtd_00007.html) | Scrum、Kanban、IPD 的场景区分 | 厂商项目模板，不是国家标准 |
 | [DORA — Continuous delivery](https://dora.dev/capabilities/continuous-delivery/) | 持续测试、CI/CD 与工程能力 | 跨地区工程指导 |
 | [DORA — Delivery performance metrics](https://dora.dev/guides/dora-metrics/) | 当前五项 delivery metrics 与使用限制 | 按服务上下文改进，不作个人排名 |
-| [GitHub — Deploying to ECS](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/amazon-elastic-container-service) | build / ECR / ECS deployment 路径 | 示例需适配；身份验证采用项目的 OIDC 方案 |
-| [GitHub — OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws) | 短期 credentials 与 trust policy 边界 | 部署时核对实际 repo 和 environment |
+| [Cloudflare Tunnel & R2](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) | 零公网端口源站接入与 S3 兼容对象存储 | 部署时核对实际 Cloudflare plan 与配额 |
+| [GitHub — Container Registry (GHCR)](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) | 镜像推送与按 digest 拉取部署 | 使用受限 `packages: write` 权限 |
 | [GitHub — Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) | environment protection 与 plan 限制 | 实际能力取决于 repo 和账号条件 |

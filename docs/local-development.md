@@ -1,35 +1,36 @@
 # Large-Lunch-Model：本地开发要求
 
-- 文档版本：v0.2。
-- 更新日期：2026-11-06（Australia/Sydney）。
+- 文档版本：v0.3。
+- 更新日期：2026-11-26（Australia/Sydney）。
 - 状态：待实现的 development contract；当前 repository 只有设计文档，没有 application、Compose、Makefile、migration 或 seed importer。
 - 本文中的目录、环境变量与 commands 是初始化时必须实现和验证的约定，不代表今天已经可以运行。
-- 上游约定：[User Stories](sprint-1-mvp-and-user-stories.md)、[总体 framework](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[AWS 要求](aws-requirements.md)。
+- 上游约定：[User Stories](sprint-1-mvp-and-user-stories.md)、[总体架构](../tech-stack-requirements.md)、[数据要求](data-requirements.md)、[VPS 与 Cloudflare 部署要求](deployment-requirements.md)。
 
 ## 1. 本地环境要达到什么结果
 
-一位开发者应能在不申请 AWS 资源、不提供真实 model API key 的情况下，通过 synthetic fixtures 与 deterministic mock provider 完成以下路径：
+一位开发者应能在不开通远程 VPS、Cloudflare 账号或提供真实 model API key / 发信 API key 的情况下，通过 synthetic fixtures、本地 **Mailpit** 邮件捕获与 deterministic mock provider 完成以下真实闭环路径：
 
-**匿名浏览目录 → 注册、验证邮箱并登录 → 提交菜品预算与 AI 消息 → Java 验证身份、Turnstile 与 admission quota → 查询已发布 Offer → Python 返回结构化候选 → Java 复核 ID、版本、预算和禁忌 → 页面展示推荐与来源。**
+**匿名浏览目录 → 站内邮箱 6 位验证码注册（Mailpit 收码）并登录 → 提交菜品预算与 AI 消息 → Java 校验双 Token 会话、Turnstile（mock）与 admission quota → 查询已发布 Offer → Python 返回结构化候选 → Java 复核 ID、版本、预算和禁忌 → 页面展示推荐与来源。**
 
-首轮必须包含身份、配额、并发和失败路径；本地通过明确标记的 fixture identity 与 Turnstile adapter 模拟外部依赖。部署仍采用 ECS Fargate；本次不改为 Vercel 或 EC2。
+首轮必须包含 Spring Boot 自建认证（双 Token 轮换、退出即时撤销、密码重置踢下线）、配额、并发和失败路径；线上部署采用 **VPS + Docker Compose + Cloudflare Tunnel / R2**，本地开发与线上保持高度同构。
 
 预算使用 `MENU_SUBTOTAL`：包含所选规格、必选加料、实际选择的可选加料及数量；配送费和平台 service fee 不计入预算，分别展示为已知金额或未知。Budget object 示例为 `{"amount":"25.00","currency":"AUD","scope":"MENU_SUBTOTAL"}`；金额的详细规则以[数据要求](data-requirements.md)为准。
 
-本地 mock 通过只能说明 application contract 可运行。真实 provider、真实来源数据、Cognito、Turnstile Siteverify、Cloudflare edge rules、AWS networking 与 production 发布仍有独立验证要求。
+本地 mock 通过只能说明 application contract 与自建认证链路可运行。真实 provider、真实来源数据、真实发信送达（Resend / SMTP + SPF/DKIM/DMARC）、live Turnstile Siteverify、Cloudflare WAF / Tunnel / R2、VPS 零公网端口与 R2 备份恢复仍有独立 staging 验证要求。
 
 ## 2. 默认拓扑与地址
 
-默认使用 host processes 运行三类 application，以便调试和 hot reload；Docker Compose 运行 MySQL 与 Redis。
+默认使用 host processes 运行三类 application，以便调试和 hot reload；Docker Compose 运行 MySQL 8.4、Redis 7.x 与 Mailpit。
 
 | 组件 | 运行位置 | 默认监听 | 职责 |
 | --- | --- | --- | --- |
-| Next.js | Host process | `127.0.0.1:3000` | 页面、SSR、本地 `/api/v1` proxy |
-| Spring Boot | Host process | `127.0.0.1:8080` | Business API、数据发布与最终校验 |
+| Next.js | Host process | `127.0.0.1:3000` | 页面、公开目录 SSR、站内认证表单、本地 `/api/v1` proxy |
+| Spring Boot | Host process | `127.0.0.1:8080` | Business API、自建 Spring Security 认证、数据发布与最终校验 |
 | FastAPI | Host process | `127.0.0.1:8000` | AI orchestration、mock / real provider adapter |
-| MySQL | Docker container | Host `127.0.0.1:3306` → container `3306` | 业务持久化 |
-| Redis | Docker container | Host `127.0.0.1:6379` → container `6379` | 可重建 cache、限流预筛选与临时状态；不作为 AI admission 权威账本 |
-| 原始资料 storage | Host filesystem | 不提供公开 HTTP 目录 | Raw / processed 文件 |
+| MySQL | Docker container | Host `127.0.0.1:3306` → container `3306` | 业务持久化、用户/会话表、AI admission 权威账本 |
+| Redis | Docker container | Host `127.0.0.1:6379` → container `6379` | 邮箱验证码、登录防爆破、会话撤销缓存、目录缓存；不作为 AI admission 权威账本 |
+| Mailpit | Docker container | SMTP `127.0.0.1:1025` / Web `127.0.0.1:8025` | 捕获本地注册与找回密码 6 位验证码邮件，无需外网发信 |
+| 原始资料 storage | Host filesystem | 不提供公开 HTTP 目录 | Raw / processed 文件（线上切换 Cloudflare R2） |
 
 ```mermaid
 flowchart LR
@@ -37,9 +38,10 @@ flowchart LR
     web -->|"/api/v1 proxy 或 SSR"| java["Java :8080"]
     java --> mysql[("MySQL :3306")]
     java --> redis[("Redis :6379")]
+    java --> mailpit["Mailpit SMTP :1025"]
     java -->|"内部请求"| ai["FastAPI :8000"]
     ai -->|"只读 tools"| java
-    importer["Import CLI / worker"] -->|"独立 ingestion 身份"| java
+    importer["Import CLI / worker"] -->|"管理员 / 独立 ingestion 身份"| java
     importer --> raw["Private local raw files"]
 ```
 
@@ -52,7 +54,7 @@ flowchart LR
 - Proxy 只匹配 `/api/v1` 及其子路径，不代理 `/internal/v1`、Actuator 或本地管理调试路径。
 - 同源 proxy 不代替身份验证；Java 继续验证用户与管理员权限。采用 cookie 时还须处理 CSRF；采用 bearer token 时不得把 token 放入 URL。
 - 本地 SSE 必须穿过实际 Next.js proxy 验证首段到达、持续输出与取消；若选定版本的 rewrite 不满足要求，应实现并验证透传 Route Handler。
-- AWS 公网入口经过 Cloudflare，再由 ALB 将 `/api/v1` 路由到 Java；本地 proxy 和云端入口使用相同 API contract，部署时不能依赖本地 rewrite 才能访问业务。本地 loopback 不能证明 Cloudflare WAF、origin isolation 或真实 client IP 传递已经正确。
+- 线上入口经过 Cloudflare Edge → Cloudflare Tunnel（`cloudflared`）→ VPS 内网 Nginx 将 `/api/v1` 路由到 Java；本地 proxy 和线上入口使用相同 API contract，部署时不能依赖本地 rewrite 才能访问业务。本地 loopback 不能证明 Cloudflare WAF、Tunnel 零公网端口隔离或真实 client IP 传递已经正确。
 
 ### 2.2 Container 地址约定
 
@@ -69,12 +71,13 @@ flowchart LR
 | Docker Desktop / Engine + Compose v2 | 能运行 Linux containers | Engine ready、Compose 版本、CPU architecture、可用磁盘 |
 | Node.js | 与所选 Next.js 兼容的受支持 LTS | 明确版本文件与 CI 相同版本 |
 | pnpm | 与 Node.js 兼容 | `packageManager` 字段、`pnpm-lock.yaml` |
-| JDK | Java 21 LTS 作为候选 | 与 Spring Boot、MyBatis starter、Spring Security 的兼容检查 |
+| JDK | Java 21 LTS 作为候选 | 与 Spring Boot 3.x、Spring Security 6、MyBatis-Plus / MyBatis、Flyway 的兼容检查 |
 | Maven | 使用 Maven Wrapper | 提交 wrapper、校验分发包与 BOM / plugin 版本 |
 | Python | Python 3.12 作为候选 | `requires-python`、`.python-version`、依赖安装与测试结果 |
 | uv | 项目统一管理 Python dependency | 固定工具版本、提交 `uv.lock` |
-| MySQL | 8.4 LTS 作为候选 | 与 JDBC、Flyway、Testcontainers 和 RDS 可用版本对齐 |
-| Redis | 与所选云端 engine 兼容 | 固定 image 版本并验证所用 commands |
+| MySQL | 8.4 LTS 作为候选 | 与 JDBC、Flyway、Testcontainers 和 VPS Compose 镜像版本对齐 |
+| Redis | 7.x LTS 作为候选 | 固定 image 版本、开启密码认证并验证所用 commands（含 Lua 原子校验脚本） |
+| Mailpit | 固定版本 tag | 本地 SMTP 收信与 Web UI / API 检索验证码 |
 
 选择候选版本后，必须形成实际 compatibility matrix，再锁定完整版本。不得把本文候选值描述为已验证组合，也不要独立升级 Spring Boot 和 MyBatis starter。Spring Boot 官方明确第三方 dependency 可能有额外要求。[Spring Boot system requirements](https://docs.spring.io/spring-boot/system-requirements.html)
 
@@ -112,22 +115,26 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 | 变量 | 本地示例 / 含义 | 读取方 |
 | --- | --- | --- |
 | `APP_ENV` | `local` | 三类 application |
-| `APP_AUTH_MODE` | `local_fixture` | Java |
+| `JWT_SIGNING_SECRET` / `JWT_KEY_ID` | 本地生成的随机高熵密钥与 `kid` | Java |
+| `JWT_ACCESS_TTL_SECONDS` / `REFRESH_TOKEN_TTL_DAYS` | `1200`（20 分钟）/ `7` 天 | Java |
+| `AUTH_COOKIE_SECURE` | 本地 HTTP 为 `false`，线上强制 `true` | Java |
+| `MAIL_PROVIDER` | `smtp`（本地指向 Mailpit `127.0.0.1:1025`；线上为 `resend` 或真实 `smtp`） | Java |
+| `MAIL_FROM_ADDRESS` | `no-reply@local.large-lunch.test` | Java |
 | `BUSINESS_API_INTERNAL_URL` | `http://127.0.0.1:8080` | Next.js server、Python |
 | `AI_INTERNAL_URL` | `http://127.0.0.1:8000` | Java |
 | `DB_HOST` / `DB_PORT` / `DB_NAME` | `127.0.0.1` / `3306` / `large_lunch_local` | Java / migration runner |
 | `DB_APP_USER` / `DB_APP_PASSWORD` | 本机独立 DML account | Java |
 | `DB_MIGRATION_USER` / `DB_MIGRATION_PASSWORD` | 本机独立 DDL account | Migration runner |
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Java |
+| `REDIS_URL` / `REDIS_PASSWORD` | `redis://127.0.0.1:6379` 与本地密码 | Java |
 | `CACHE_NAMESPACE` | `llm:local:<checkout>` | Java |
-| `OBJECT_STORE_BACKEND` | `filesystem` | Java / ingestion |
+| `OBJECT_STORE_BACKEND` | `filesystem`（线上为 `r2` S3 兼容协议） | Java / ingestion |
 | `RAW_DATA_ROOT` | 指向本 checkout 的 `data/raw` 的绝对路径 | Java / ingestion |
 | `AI_PROVIDER_MODE` | `mock` 或 `real` | Python |
 | `AI_PROVIDER_ID` / `AI_MODEL_ID` | Mock 模式也记录固定 ID | Python |
 | `BUSINESS_TO_AI_TOKEN` | 单独生成的本地 service credential | Java / AI |
 | `AI_TO_BUSINESS_TOKEN` | 受 request scope 限制的只读 tools、dispatch claim / usage credential | AI / Java |
 | `INGESTION_TO_BUSINESS_TOKEN` | 仅导入权限的 credential | Import client / Java |
-| `LOCAL_USER_TOKEN` / `LOCAL_ADMIN_TOKEN` | 对应不同 fixture actors | Java；用户手动输入本地页面 / admin CLI |
+| `LOCAL_SEED_ADMIN_EMAIL` / `LOCAL_SEED_ADMIN_PASSWORD` | 仅本地 seed 初始化测试管理员用；绝不用于 staging / production | 本地 seed 脚本 / admin CLI |
 | `TURNSTILE_MODE` | `mock`、`test` 或 `live`；含义见 6.1 | Java；Next.js 使用相同的显式 mode |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public sitekey；mock 模式不加载 Cloudflare widget | Browser |
 | `TURNSTILE_SECRET_KEY` | Siteverify secret；仅 Java 读取，test mode 使用官方 test secret | Java |
@@ -139,7 +146,7 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 | `AI_MAX_MESSAGE_CHARS` / `AI_MAX_REQUEST_BYTES` | `2000` Unicode code points / `32768` bytes；body 读取时即限制 | Java validation；web 同步提示 |
 | `AI_QUEUE_ENABLED` | `false`；超出容量立即拒绝，不排无限队列 | Java admission |
 
-三个 service token 名在本地与云端一致，实际值、caller identity、scope 和 Secrets 分环境隔离。云端传输与轮换遵循[总体 framework](../tech-stack-requirements.md)和[AWS 要求](aws-requirements.md)。
+三个 service token 名在本地与线上一致，实际值、caller identity、scope 和环境变量分环境隔离。线上部署与轮换遵循[总体架构](../tech-stack-requirements.md)和[VPS 与 Cloudflare 部署要求](deployment-requirements.md)。
 
 上述 AI 数值是首轮可配置默认值，不是已经测得的系统 capacity；quota 的唯一 contract 以总体 framework 为准，修改时同步 fixtures 与部署配置并记录 config version。每日 request quota 计入 provider 已启动或可能已启动的尝试；在启动前原子预留，仅明确未启动失败可释放。滚动 rate limit 独立计算每个新 turn 的提交尝试，验证失败也计入；同 key 查询已有状态不重复计数，不能以 provider 未启动为由无限重试。Input token 上限包含系统指令、历史与候选资料，不能只计算本轮用户文本。
 
@@ -147,22 +154,23 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 - `.env.example` 只允许非敏感默认值与占位值；启动时拒绝仍为占位符的 credentials。
 - 不把完整 root env 自动传给所有服务：Python AI 不应获得 MySQL credentials、ingestion write token 或 admin token。
 - Local raw storage 的 read/write、path traversal 防护、source policy 和 retention 仍由 application 管理；不得通过 Next.js `public/` 目录暴露。
-- 本地 filesystem adapter 仅模拟应用所需 storage contract。S3 presigned URL、IAM 与 CloudFront 行为必须在 staging 单独测试。
+- 本地 filesystem adapter 仅模拟应用所需 storage contract。Cloudflare R2（S3 兼容）presigned URL、私有桶权限隔离与公开自定义域名 CDN 行为必须在 staging 单独测试。
 
-## 6. 本地身份与权限边界
+## 6. 本地身份与权限边界（真实 Spring Boot 认证）
 
-本地默认 fixture identity，以降低 AWS dependency，同时保留真实的授权分支。
+采用 Spring Boot 自建认证后，**本地环境直接运行与线上完全一致的 Spring Security 6 + 双 Token + Redis + MySQL 认证代码**，仅把外部邮件投递替换为本地 Mailpit 容器，不再需要模拟外部云厂商 IdP：
 
-1. `local_fixture` 仅允许 `APP_ENV=local`，并要求 Next.js、Java、AI 和数据库 published ports 绑定 loopback。
-2. Java 将独立 local bearer tokens 映射到固定 fixture actors 和 roles；token 不得来自任意 `user_id`、`role` header 或 query 参数。
-3. 普通用户和 admin 至少使用两个不同 actors。Java 从私有 env 读取并校验 fixture token；开发者在仅 local profile 出现的页面手工输入 `LOCAL_USER_TOKEN`，页面仅保存在内存并作为 Authorization header 发送，不提供读取服务器 env 的 endpoint。`LOCAL_ADMIN_TOKEN` 只交给 admin CLI，fixture admin 显式拥有 source/catalog manage、import、review、publish scopes；production 不沿用该 token。用户 token 无法调用管理接口。
-4. Service credentials 分配不同 audiences / scopes：Java → AI、AI → Java read / claim / usage、ingestion → Java draft write 相互不可替代。
-5. `local_fixture` 配置不进入 staging / production。非 local 环境发现此 mode、local tokens 或缺失 issuer 配置时应 fail closed，CI 需覆盖启动拒绝案例。
-6. 云端身份验证使用 Cognito managed login、Authorization Code + PKCE。Java 验证 access token 的签名、issuer、expiry、token_use、app client / audience 与 scope；ID token 不充当 API credential。本地 fake actor 测试不算 Cognito integration test。
-7. 最小 fixture actors 包含匿名、已验证邮箱的普通用户 A / B、未验证邮箱用户、disabled 用户与 admin。邮箱确认来自 Java 在新付费 turn 通过 Cognito `AdminGetUser` 取得的 `Enabled` 与 `email_verified`，并结合应用 `User.status=ACTIVE / DISABLED` 判断；不接受 browser 自报字段。Local fixtures 模拟相同可信 profile 分支。每个私人请求检查服务端 account 与 AuthSession 状态；token expiry 必须要求重新登录。
-8. AI chat、新生成的推荐及未命中缓存的 AI overview 都走同一身份与配额 gate；匿名可读取公开目录和已批准的缓存概览，cache miss 不得触发后台付费调用。Conversation、message 和 recommendation 归属于服务端确定的 owner；用户 A 访问 B 的 ID 统一返回 `404 NOT_FOUND`，不泄漏资源存在性。
-9. `POST /api/v1/auth/logout` 将当前 token family 的可信 `origin_jti` 写入 AuthSession revoke 状态，保留到该 family 最大有效期；随后 browser 完成 Cognito revoke / logout、清理 token 与私人缓存并广播给其他 tab。当前 family 已撤销但 JWT 其他校验仍有效的重复 logout 可幂等成功；该例外不授予任何私人读取权限。服务端 logout 失败时提示结果未确认，仍清本机敏感状态。测试复制注销前 access token 后再次请求也应受拒绝，不能仅证明页面返回登录状态。
-10. 若需要手机或跨机器开发，另建明确的 development profile 和认证网络配置；不得直接将 fixture mode 改为监听 `0.0.0.0`。
+1. 本地全部服务与端口绑定 loopback（`127.0.0.1`），`AUTH_COOKIE_SECURE=false` 仅允许在 `APP_ENV=local` 生效；staging / production 强制开启 `Secure` Cookie 与严格 `Origin` 校验，启动时检测不安全配置直接 fail closed。
+2. 本地可完整走通真实接口：`POST /api/v1/auth/email-codes` → 从 Mailpit Web UI（`http://127.0.0.1:8025`）或自动化测试调用 Mailpit HTTP API 读取 6 位验证码 → `POST /api/v1/auth/register` / `login` / `refresh` / `logout` / `password/reset`。
+3. 最小 seed fixture 账号包含：已验证邮箱的普通用户 A / B（`ROLE_USER`）、未验证邮箱用户（`email_verified=false`）、已禁用用户（`status=DISABLED`）以及运营管理员账号（含 `ROLE_OPERATOR`、`ROLE_REVIEWER`、`ROLE_PUBLISHER`）。普通注册绝不会获得任何管理角色。
+4. Service credentials 分配不同 audiences / scopes：`BUSINESS_TO_AI_TOKEN`、`AI_TO_BUSINESS_TOKEN`、`INGESTION_TO_BUSINESS_TOKEN` 相互不可替代。
+5. SpringDoc OpenAPI / Knife4j 文档 UI 仅允许在 `APP_ENV=local` 启用；staging / production 必须关闭并在 Nginx 层返回 404。
+6. Java 对每个私有 API 执行：JWT 验签（签名、`iss`、`exp`、`token_use=access`）→ 查 Redis 会话撤销与禁用缓存（Redis 不可用时回查 MySQL `auth_session` 与 `users` 表）。每次新付费 AI turn 进入 admission 前均查 MySQL 确认 `status=ACTIVE` 与 `email_verified=true`，绝不信任客户端自报字段。
+7. AI chat、新生成的推荐及未命中缓存的 AI overview 都走同一身份与配额 gate；匿名可读取公开目录和已批准的缓存概览，cache miss 不得触发后台付费调用。Conversation、message 和 recommendation 归属于服务端确定的 owner；用户 A 访问 B 的 ID 统一返回 `404 NOT_FOUND`，不泄漏资源存在性。
+8. Refresh Token 通过 `HttpOnly; SameSite=Lax; Path=/api/v1/auth` Cookie 传输；`POST /api/v1/auth/refresh` 执行 Refresh Token Rotation，并验证“重放已轮换的旧 Refresh Token 会立即撤销整个 `token_family_id`”。
+9. `POST /api/v1/auth/logout` 将当前 `auth_session` 在 MySQL 标记 `revoked_at` 并写入 Redis 撤销键、清除 Refresh Cookie；前端清理内存 Access Token、私人缓存并广播给其他 tab。测试复制注销前尚未过期的 Access Token 再次请求私有 API，必须立即被拒绝（包括在停止 Redis 容器的故障注入场景下回查 MySQL 仍被拒绝）。
+10. 密码重置（`POST /api/v1/auth/password/reset`）必须更新 `users.token_valid_after` 并撤销全部历史 `auth_session`，使所有旧设备立即下线。
+11. 若需要手机或局域网调试，另建明确的局域网 profile 与受控配置，不得把开发默认配置暴露到公网。
 
 ### 6.1 Turnstile 的三种验证模式
 
@@ -174,13 +182,13 @@ MySQL 使用 Compose named volume，不能把数据库内部文件作为普通 r
 
 官方 test keys 用于可重复的自动化测试，不是线上保护；production key 不允许 localhost。只有 public sitekey 可以进入 browser，secret 不进入任何 `NEXT_PUBLIC_*` 变量。[Cloudflare Turnstile testing](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
 
-Live mode 的 Java 必须验证 Siteverify `success`、预期 `action=ai_chat` 与 hostname；按需 overview 等其他生成入口启用时使用各自明确 action allowlist 并复用同一 admission service。Token 有效期为 300 秒且只能使用一次。缺失、过期、重复或不匹配均拒绝新 AI 调用；Siteverify 网络故障也不能跳过验证。客户端获取新 token 后由用户明确重试；已终态失败的 request 使用新 key 建立新 turn，不自动提交另一次付费生成。[Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
+Live mode 的 Java 必须验证 Siteverify `success`、预期 `action`（如 `ai_chat`、`auth_email_code`、`auth_register`、`auth_password_reset`、`auth_login`）与 hostname；按需 overview 等其他生成入口启用时使用各自明确 action allowlist 并复用同一 admission service。Token 有效期为 300 秒且只能使用一次。缺失、过期、重复或不匹配均拒绝请求；Siteverify 网络故障也不能跳过验证。客户端获取新 token 后由用户明确重试；已终态失败的 AI request 使用新 key 建立新 turn，不自动提交另一次付费生成。[Turnstile server-side validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
 
-Test mode 根据官方 dummy response 建立独立、显式的测试 expectation（例如文档中的 `hostname=localhost`、`action=test`），不得据此放宽 live validator。Hostname / action / expiry 的业务拒绝分支由 mock response contract tests 覆盖，并在 staging 使用 live token 重验。CI 中 fixture auth 使用隔离 runner 的 `APP_ENV=local`；不把 `APP_ENV=ci` 当作绕过 local-only auth guard 的隐含例外。
+Test mode 根据官方 dummy response 建立独立、显式的测试 expectation（例如文档中的 `hostname=localhost`、`action=test`），不得据此放宽 live validator。Hostname / action / expiry 的业务拒绝分支由 mock response contract tests 覆盖，并在 staging 使用 live token 重验。CI 使用隔离 runner 与独立测试环境配置，绝不把 CI profile 发布到公网。
 
 同一 owner、同一 `Idempotency-Key`、相同业务 payload 的重试先查已有 request，返回该 request 状态，不重复消费 Turnstile token，也不再次调用 provider。业务 payload hash 排除短期 Turnstile token；并发首次请求由数据库 unique constraint 与 request ownership 保证只有一个 verifier。Siteverify transport retry 使用稳定的 `idempotency_key`。Mock adapter 也必须覆盖这些分支，不能简单对全部请求返回 true。
 
-非 local / CI 环境检测到 mock / test mode、官方 test keys、local fixture tokens 或不完整 live 配置时启动失败；CI profile 本身不得发布到公网。真实 widget 的 CSP 与浏览器加载失败需要单独验证；不得为了使 widget 可用而关闭全部 CSP 或开放任意 CORS。外部 challenge script 不能写入应用 auth token。
+非 local / CI 环境检测到 Turnstile `mock` / `test` mode、官方 test keys、`AUTH_COOKIE_SECURE=false`、本地测试邮件配置或不完整 live 配置时启动失败；CI profile 本身不得发布到公网。真实 widget 的 CSP 与浏览器加载失败需要单独验证；不得为了使 widget 可用而关闭全部 CSP 或开放任意 CORS。外部 challenge script 不能写入应用 auth token。
 
 ### 6.2 Admission 与并发测试拓扑
 
@@ -190,7 +198,7 @@ Python 调用 provider 前必须以 AI service identity 和 Java 签发的 reque
 
 初始化时另提供显式 load-test profile：两个 Java instances 和两个 AI instances 共用测试 MySQL，由测试 router 分散流量；所有 ports 绑定 loopback 或隔离 CI network，不能暴露到公网。Profile 提供可观测 mock provider invocation counter 与 latch，使测试能证明同时在途的调用数，而不只观察 HTTP 返回码。每组测试使用独立 namespace / database；单次 admission 测试中的全部 replicas 必须共用同一 ledger，不能按 process 自动隔离 quota。
 
-- Lease 初值 90 秒，每 15 秒续约，使用 DB 时间与 owner / fencing version；provider connect timeout 5 秒、operation deadline 60 秒、Java request deadline 90 秒、SSE heartbeat 15 秒；云端 ALB idle timeout 与 Service Connect per-request / idle timeout 为 120 秒。实现必须验证 deadline、heartbeat 与续约的关系，不能把 lease expiry 当作释放资格。
+- Lease 初值 90 秒，每 15 秒续约，使用 DB 时间与 owner / fencing version；provider connect timeout 5 秒、operation deadline 60 秒、Java request deadline 90 秒、SSE heartbeat 15 秒；线上 VPS Nginx `proxy_read_timeout` / `proxy_send_timeout` 为 120 秒（配合 15 秒 heartbeat 避开 Cloudflare Proxy 100 秒空闲超时）。实现必须验证 deadline、heartbeat 与续约的关系，不能把 lease expiry 当作释放资格。
 - Browser disconnect、Cancel、Java crash 或 lease expiry 不等于远端 provider 已停止。对 provider 是否已启动或结束不确定的 request 保留保守 reservation，并进入 bounded reconciliation；不能盲目释放 slot 后立即再次生成。超出 reconciliation deadline 仍无法确认时停止受影响的新 admission 并告警；这些控制不宣称能强制终止 provider 内部计算。
 - provider 已启动或可能已启动的失败、timeout 和 Cancel 仍计入每日 request quota；actual usage 有唯一结算 key。Unknown usage 不按零计费，保守保留 token reservation，避免重复扣减或负数；旧 owner 迟到回调不能越过 fencing version 覆盖终态。
 - 预留完整 input + 最大 output token 上界；真实 usage 只能在幂等结算后释放多余额度。跨 UTC 午夜的请求保留原 quota bucket 与 active slot，不因新日期而获得额外并发。
@@ -242,7 +250,7 @@ Import client、AI service、Python worker 均不得绕过 Java 直接写业务�
 | --- | --- |
 | `make bootstrap` | 校验并锁定 compatibility matrix、安装各语言 dependencies、生成仅本地使用的 env 与随机 fixture credentials，拒绝覆盖现有私有配置 |
 | `make doctor` | 检查 toolchain、Docker Engine、ports、env placeholders、CPU architecture，避免输出 secrets |
-| `make infra-up` | 启动 MySQL / Redis，等待实际 health checks 通过 |
+| `make infra-up` | 启动 MySQL / Redis / Mailpit，等待实际 health checks 通过 |
 | `make migrate` | 使用独立账号执行 Flyway，失败时停止后续启动 |
 | `make dev-business` | 启动 loopback Java，验证 schema compatibility |
 | `make seed-fixtures` | 经 Java API 幂等导入、审核与发布明确标记的 synthetic dataset |
@@ -321,7 +329,7 @@ Mock provider 提供显式 scenario，例如 normal、timeout、invalid ID、inv
 | Cancel、provider timeout、lease 失效、usage 回报重复或乱序 | reservation 不提前释放，结算幂等；unknown 状态进入 reconciliation，不能当作免费失败 |
 | 请求跨 UTC 午夜、同 conversation 并发编辑 | quota bucket 归属不变，active slot 不重置；conversation version 防止两轮历史交错 |
 
-Load tests 只针对隔离 mock provider；真实 provider、Cognito、Cloudflare 只运行低量 integration smoke。不能把本地 50 用户测试当作第三方服务的压力测试授权。
+Load tests 只针对隔离 mock provider；真实 provider、真实发信与 Cloudflare 只运行低量 integration smoke。不能把本地 50 用户测试当作第三方服务的压力测试授权。
 
 ## 10. 真实 provider 与 staging 验证
 
@@ -331,9 +339,9 @@ Load tests 只针对隔离 mock provider；真实 provider、Cognito、Cloudflar
 
 原始来源资料只有在使用条件允许外部 inference 时才发送给真实 provider；可以仅发送经过允许的必要结构化事实。真实 provider 失败不能使目录和普通筛选不可用。
 
-Cognito managed login / signup / email verification、真实 Turnstile widget 与 Siteverify、Cloudflare WAF / rate rules、ALB origin isolation、SSE、S3、IAM、ECS service discovery、migration job、backup / restore 在 staging 验证，按照[AWS 要求](aws-requirements.md)保存证据。本地通过不代替云端验收。
+真实发信（Resend / SMTP）与邮箱 6 位验证码注册/找回密码、双 Token 轮换与撤销、真实 Turnstile widget 与 Siteverify、Cloudflare WAF / rate rules / Tunnel、VPS 防火墙零公网业务端口、Nginx 路由与 SSE、Cloudflare R2、一次性 migration 容器、R2 加密备份与恢复演练在 staging 验证，按照[VPS 与 Cloudflare 部署要求](deployment-requirements.md)保存证据。本地通过不代替线上验收。
 
-Staging smoke 必须检查 direct ALB hostname / IP 绕过被拒绝、错误 origin secret / Host 被拒绝、真实 client IP 只从可信代理链读取、API / SSE 不收到 Managed Challenge HTML，以及私人响应不被 edge cache。Cognito hosted domain 并不自动受到应用 Cloudflare zone 的保护；其 AWS WAF 和 identity protections 另行验证。真实 key 与 secret 分环境管理，staging 通过不能证明 production 已完成相同配置。
+Staging smoke 必须检查直连 VPS 公网 80 / 443 / 3000 / 8080 / 8000 / 3306 / 6379 均不可达、公网访问 `/internal/*` / `/actuator/*` / `/swagger-ui*` / `/doc.html` 返回 404、真实 client IP 只从可信 `cloudflared` → Nginx 代理链读取、API / SSE 不收到 Managed Challenge HTML，以及私人响应不被 edge cache。真实 key 与 secret 分环境管理，staging 通过不能证明 production 已完成相同配置。
 
 ## 11. 故障排查与数据保留
 
@@ -367,7 +375,7 @@ Staging smoke 必须检查 direct ALB hostname / IP 绕过被拒绝、错误 ori
 - [ ] 匿名 / 未验证 / disabled / 跨 owner 请求受拒绝；所有新付费生成路径都经过相同 gate。
 - [ ] Turnstile mock、官方 test keys 与 staging live keys 的证据分别记录，non-local bypass 启动检查通过。
 - [ ] 2 Java + 2 AI shared-ledger 测试证明 global / user / provider limits、idempotency、budget 与 recovery，不以单进程测试代替。
-- [ ] Cloudflare origin isolation、可信 client IP、private no-store 与 Cognito 独立防护有 staging 证据。
+- [ ] Cloudflare Tunnel 零公网端口隔离、可信 client IP、`private, no-store`、Nginx 阻断内部/文档路径与 R2 备份恢复演练有 staging 证据。
 - [ ] 单个真实 provider 的 smoke evidence 与 mock test results 分开记录。
 - [ ] 所有未验证项保留未完成状态，不以文档存在代表功能完成。
 

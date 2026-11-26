@@ -1,10 +1,10 @@
 # Large-Lunch-Model：数据要求
 
-- 版本：v0.2；更新日期：2026-11-06（Australia/Sydney）。
+- 版本：v0.3；更新日期：2026-11-26（Australia/Sydney）。
 - 状态：待实现的 data contract 与验收基线；本文未创建数据库、采集数据或取得平台授权。
-- 适用范围：悉尼 CBD 及周边的门店、菜单、渠道报价、来源、审核、发布、推荐证据，以及首轮账号、私人会话、admission 与 quota ledger。
+- 适用范围：悉尼 CBD 及周边的门店、菜单、渠道报价、来源、审核、发布、推荐证据，以及首轮 Spring Boot 自建账号、会话、私人对话、admission 与 quota ledger。
 - 用户已确认：预算按菜品小计，包含所选规格与必选加料；配送费和平台 service fee 另列，不计入预算。
-- 关联文件：[技术架构](../tech-stack-requirements.md)、[AWS 要求](aws-requirements.md)、[本地开发](local-development.md)、[User Stories](sprint-1-mvp-and-user-stories.md)。
+- 关联文件：[技术架构](../tech-stack-requirements.md)、[VPS 与 Cloudflare 部署要求](deployment-requirements.md)、[本地开发](local-development.md)、[User Stories](sprint-1-mvp-and-user-stories.md)。
 
 ## 1. 首阶段交付范围
 
@@ -87,7 +87,7 @@ MySQL 金额使用 `DECIMAL(12,2)`，Java 使用 `BigDecimal`，Python 使用 `D
 | `allowed_fields`, `redacted_fields` | 可采集、可保存、可展示及可送入模型的 field allowlist |
 | `refresh_policy`, `owner`, `status` | 更新频率、维护人；ACTIVE、PAUSED、REVOKED |
 
-涉及某用途的权限为 UNKNOWN 时，不执行该用途。允许在 UI 展示不代表允许送到外部 LLM；允许 API 获取不代表允许在 S3 保存完整 response。清洗、翻译、embedding 或截图不会自动改变来源使用条件。
+涉及某用途的权限为 UNKNOWN 时，不执行该用途。允许在 UI 展示不代表允许送到外部 LLM；允许 API 获取不代表允许在 Cloudflare R2 保存完整 response。清洗、翻译、embedding 或截图不会自动改变来源使用条件。
 
 ### 3.3 存储规则必须作用于整个 pipeline
 
@@ -137,7 +137,7 @@ OfferVersion 不代表实时库存保证。`availability` 为 AVAILABLE、UNAVAI
 
 同一 MenuItem 的名称、价格、地址和饮食属性可能来自不同来源，因此每个用于业务判断或展示的事实字段必须关联 FieldEvidence。价格证据必须对应具体 OfferVersion 和规格；不能用门店首页来源代替某个价格的证据。
 
-`source_ids` 在推荐 contract 中明确指向可授权展示的 `SourceRecord` IDs，另保留 `source_id` 表示 registry 来源；两者不能混用。原始资料为私有时，API 返回经许可的来源说明或 URL，不暴露 raw S3 object key、presigned URL 或授权证据。
+`source_ids` 在推荐 contract 中明确指向可授权展示的 `SourceRecord` IDs，另保留 `source_id` 表示 registry 来源；两者不能混用。原始资料为私有时，API 返回经许可的来源说明或 URL，不暴露 raw R2 object key、presigned URL 或授权证据。
 
 推断得到的菜系、翻译或口味标签标记 `evidence_type=INFERRED` 并保存方法 / model version。AI 推断不升级为商家确认的过敏原、价格或营业事实。
 
@@ -147,8 +147,10 @@ OfferVersion 不代表实时库存保证。`availability` 为 AVAILABLE、UNAVAI
 
 | Entity | 最小字段与约束 |
 | --- | --- |
-| User | `user_id`、`cognito_issuer`、`cognito_sub`、`status=ACTIVE/DISABLED`、可信 `email_verified` / `identity_checked_at`、UTC timestamps；`UNIQUE(cognito_issuer,cognito_sub)`；不存密码 |
-| AuthSession | 从有效 access JWT 读取的 `origin_jti` 与 User 关联、撤销时间、`retain_until`；按 issuer / origin_jti 唯一，client 无权设置；撤销 tombstone 覆盖该 family 最长可能有效期 |
+| User | `user_id`、`email`（小写规范化，`UNIQUE(email)`）、`password_hash`（`BCrypt` 单向加盐哈希）、`status=ACTIVE/DISABLED`、`email_verified`、`email_verified_at`、`token_valid_after`（全局踢下线时间戳，密码重置或强制注销时更新）、UTC timestamps；绝不存明文密码 |
+| UserRole | `user_id`、`role_code`（`ROLE_USER / ROLE_OPERATOR / ROLE_REVIEWER / ROLE_PUBLISHER / ROLE_ADMIN`）；`UNIQUE(user_id,role_code)`；默认注册只授 `ROLE_USER` |
+| AuthSession | `session_id`、`user_id`、`token_family_id`、`refresh_token_hash`（SHA-256 哈希，不存明文 Refresh Token）、`previous_refresh_token_hash`（用于重放检测）、`expires_at`、`revoked_at`、`revoke_reason`、`retain_until`、脱敏设备/UA 摘要；撤销 tombstone 至少覆盖该 family 最长有效期 |
+| EmailVerificationCode（Redis） | 键 `llm:{env}:auth:code:{purpose}:{email_hash}` 存 6 位验证码加盐哈希、尝试次数与短 TTL（如 10 分钟）；另有 60 秒发送冷却键与每日发送计数键；不持久化至业务表、不入常规日志 |
 | Conversation | `conversation_id`、`owner_user_id`、`version`、创建 / 更新时间、内容过期时间；owner + updated_at 索引用于受限分页 |
 | ChatMessage | `message_id`、`conversation_id`、`sequence`、`role`、受长度限制的正文、`request_id`、创建 / 删除时间；`UNIQUE(conversation_id,sequence)`，用户不能伪装 system / assistant role |
 | AIRequest | `request_id`、owner、conversation、operation、Idempotency-Key / payload hash、expected conversation version、发起 AuthSession / token expiry、business status、challenge 验证结果 metadata、provider / Prompt / admission config version、reservation bucket、dispatch claim 与完成时间；`UNIQUE(owner_user_id,operation,idempotency_key)` |
@@ -160,14 +162,14 @@ OfferVersion 不代表实时库存保证。`availability` 为 AVAILABLE、UNAVAI
 
 `AIRequest` 是入口与收费控制记录；`Recommendation` 是其经业务验证的结果。一个 request 最多关联一份完成的 Recommendation，失败 / 无候选 / 取消允许没有推荐内容。ChatMessage 的生成结果引用 request / Recommendation，不通过再次调用模型恢复历史。
 
-`User.email_verified` 只是来自可信 Cognito profile 的同步字段。每次新付费请求按 framework 查询受控 `AdminGetUser` 并核对 subject、Enabled 和邮箱确认；浏览器 flag、相同邮箱字符串或 ID token 不能代替 API auth。应用 DISABLED 不因 profile 同步自动恢复。private API 每次检查账号、session 与 owner；不同用户不可读取、取消、追加或修改彼此的记录，越权与不存在均返回 404。
+`User` 表是身份状态、邮箱验证状态与角色的唯一权威来源。JWT 验签通过后，Java 先查 Redis 撤销/禁用缓存，Redis 不可用时回查 MySQL `auth_session` 与 `users` 表；绝不信任浏览器自报的 `user_id`、角色或 `email_verified`。每次新付费 AI 调用在进入 admission 前均在本地 MySQL 校验 `status=ACTIVE` 与 `email_verified=true`。private API 每次检查账号、session 与 owner；不同用户不可读取、取消、追加或修改彼此的记录，越权与不存在均返回 404。
 
 ### 4.5 会话一致性与 admission ledger
 
 - Conversation append 使用 `expected_conversation_version` / CAS。一个新 turn 的接受与 version 更新、user message / request 关联在 atomic admission transaction 中完成；两个 tab 的不同输入不能相互覆盖或丢失。未通过 admission 的草稿保留在客户端，不能伪装成已接受消息。无候选的合法 turn 使用不预留付费 quota 的短接受事务，同样检查 owner / account / session、version 与会话无 active turn，再更新 version、保存消息和空结果；刷新可恢复该结果。若 request 已存在，优先复用已有结果，不因旧 expected version 再报冲突。
 - `AIRequest.business_status` 使用 `pending / running / completed / failed / cancelled`；与 framework SSE 状态一致。另设 admission state `RESERVED / IN_FLIGHT / RECONCILIATION_REQUIRED / SETTLED / RELEASED`。失败 / cancelled 并不等于 SETTLED / RELEASED；未知收费调用仍可占用 slot / reservation。
 - dispatch claim 由 Java 在 MySQL 中原子消费一次，Python 通过受限 internal API 领取。领取后进程崩溃或网络超时不自动再发起 provider 调用；保守记录未知状态。usage / terminal 回调带 request、claim / fencing version 和 event ID，Java 校验并幂等结算；旧 owner 的迟到回调不能重复释放 slot。
-- global / provider / user slot 与 daily request / token reservation 使用相同事务与固定锁顺序。先预留额度再访问 provider，外部 Siteverify、Cognito、provider 请求不持有数据库锁。额度总和必须可由 request ledger 重建，不允许 Redis 故障时切换到空计数器。DB 无法确认资格时 fail closed。
+- global / provider / user slot 与 daily request / token reservation 使用相同事务与固定锁顺序。先预留额度再访问 provider，外部 Siteverify、发信、provider 请求不持有数据库锁。额度总和必须可由 request ledger 重建，不允许 Redis 故障时切换到空计数器。DB 无法确认资格时 fail closed。
 - token reservation 包含完整 Prompt 上界和最大输出；默认 input 6000 / output 1000、每 turn 1 次 LLM，不能只按用户一句话计费。实际 usage 明确后结算差额；provider 已开始或可能开始但 usage 未知时保留上界，request quota 计数不退还。确认 provider 未开始的失败才可完全释放 daily reservation。
 - lease 初值 90 秒、续约 15 秒；到期转 reconciliation，不能仅靠 TTL 自动复用未知 provider slot。重新分配资格必须有可靠终态或受审计的人工处理依据，无法确认时保留占位并告警。无自动等待队列。
 - daily bucket 使用 DB UTC 时间、固定在 reservation 创建时的日期；跨午夜完成仍结算到原 bucket，active slot 不因日期变化清零。分钟限制是 rolling 60 秒；配置变更、容器重启与扩容不清空已消费 / 预留值。
@@ -230,19 +232,20 @@ Branch 坐标缺失时仍可进入不含距离条件的目录，但不能声称�
 
 ## 7. Storage 与访问边界
 
-| 数据 | 本地 | AWS | Owner / 约束 |
+| 数据 | 本地 | 线上（VPS + Cloudflare） | Owner / 约束 |
 | --- | --- | --- | --- |
-| 获准保存的原始菜单、照片、PDF、response | gitignored `data/raw/` | Private S3 raw bucket / prefix | 来源 policy 决定保留时间，不走公共 CDN |
-| 清洗中间产物与 error report | gitignored `data/processed/` | Private S3 processing prefix | 不作为发布目录的唯一事实来源 |
-| Source、draft、review、published facts、版本、User / AuthSession、私人会话、admission / quota、推荐记录、outbox | MySQL persistent volume | RDS for MySQL | Java 持有业务写权限 |
-| 热门查询与短期状态 | Redis | ElastiCache | 可重建，设 TTL；不替代 MySQL |
-| 可再分发的小型 fixture、schema、migration | Git；fixture 放在 `data/fixtures/` | CI / release artifacts | 明确授权或 synthetic；不提交批量真实 raw data |
+| 获准保存的原始菜单、照片、PDF、response | gitignored `data/raw/` | Private Cloudflare R2（`llm-<env>-raw`） | 来源 policy 决定保留时间，不走公共 CDN |
+| 清洗中间产物与 error report | gitignored `data/processed/` | Private Cloudflare R2 processing prefix | 不作为发布目录的唯一事实来源 |
+| 获准公开展示的图片与 Persona 素材 | 本地静态资源 / mock | Public Cloudflare R2（`llm-<env>-assets` + 自定义域名 CDN） | 带版本或 content hash key；撤回时删对象并清 CDN cache |
+| Source、draft、review、published facts、版本、User / UserRole / AuthSession、私人会话、admission / quota、推荐记录、outbox | Docker Compose MySQL volume | VPS Docker Compose MySQL 8.4（+ 每日加密备份至 R2 `llm-<env>-backups`） | Java 持有业务写权限 |
+| 邮箱验证码、登录失败冷却、会话撤销加速、热门目录缓存 | Docker Compose Redis | VPS Docker Compose Redis 7.x（密码保护） | 设 TTL；不替代 MySQL 业务事实或 AI admission ledger |
+| 可再分发的小型 fixture、schema、migration | Git；fixture 放在 `data/fixtures/` | CI / GHCR release artifacts | 明确授权或 synthetic；不提交批量真实 raw data |
 
-S3 保存大文件，MySQL 保存 metadata、关系和 object reference；不把大段 HTML / 图片 base64 塞入业务表或 SQS。原始文件先进入 quarantine，完成大小、类型、格式与必要的恶意文件检查后才能提取；文件名和来源 URL 不直接用作可执行路径。
+Cloudflare R2（S3 兼容 API）保存大文件，MySQL 保存 metadata、关系和 object reference；不把大段 HTML / 图片 base64 塞入业务表或任务队列。原始文件先进入 quarantine，完成大小、类型、格式与必要的恶意文件检查后才能提取；文件名和来源 URL 不直接用作可执行路径。
 
-Python AI service 不直接访问业务数据库或 raw bucket。Python ingestion worker 有受限对象读取权限，并通过独立 service identity 调用 Java ingestion API；它没有审核、发布或任意 SQL 权限。AI 的只读 tools 与 ingestion 的写入 credentials / scopes 分开。
+Python AI service 不直接访问业务数据库、Redis 或 R2 raw bucket。Python ingestion worker 有受限对象读取权限，并通过独立 service identity 调用 Java ingestion API；它没有审核、发布或任意 SQL 权限。AI 的只读 tools 与 ingestion 的写入 credentials / scopes 分开。
 
-数据库 backup retention、S3 versioning / lifecycle、日志与 tracing retention 必须服从 Source policy。对象删除不等于 noncurrent versions 或备份中的副本立即消失；不能满足删除时限的来源不进入该长期存储路径，详见 [AWS 要求](aws-requirements.md)。
+数据库 R2 加密备份 retention、R2 object lifecycle、日志与 tracing retention 必须服从 Source policy。对象删除不等于备份中的副本立即消失；不能满足删除时限的来源不进入该长期存储路径，详见 [VPS 与 Cloudflare 部署要求](deployment-requirements.md)。
 
 ## 8. Ingestion 与发布 contract
 
@@ -265,7 +268,7 @@ Python AI service 不直接访问业务数据库或 raw bucket。Python ingestio
 | `POST /api/v1/admin/ingestion/batches/{id}/review` | reviewer / `catalog:review` | 对指定 payload hash 审核；保存 actor 与决定 |
 | `POST /api/v1/admin/ingestion/batches/{id}/publish` | publisher / `catalog:publish` | 校验版本与权限，在短 transaction 中发布 |
 
-首轮人工 import CLI 放在 `tools/ingestion/`，使用 operator 的 `catalog:import` 用户权限调用 `/api/v1/admin/ingestion`。本地自动测试也验证独立的 internal ingestion 路径。云端人工 CLI 经 Cloudflare 保护的 HTTPS ALB 管理入口，不开放 `/internal/v1`，也不假定公网 CLI 能解析 Service Connect 地址。不得通过直接写 SQL 绕过 schema validation、review 和 publication rules。可由同一负责人兼任 reviewer / publisher，但各动作仍需独立 audit record。
+首轮人工 import CLI 放在 `tools/ingestion/`，使用具备 `catalog:import` 权限的管理员账号登录调用 `/api/v1/admin/ingestion`。本地自动测试也验证独立的 internal ingestion 路径。线上人工 CLI 经 Cloudflare Tunnel → VPS Nginx 管理入口，绝不对外开放 `/internal/v1`。不得通过直接写 SQL 绕过 schema validation、review 和 publication rules。可由同一负责人兼任 reviewer / publisher，但各动作仍需独立 audit record。
 
 从空库启动时，顺序为 Flyway schema → operator 登记 Source policy / Restaurant / Branch → 创建 SourceRecord → 创建 batch → 上传 records chunks → complete → review → publish。Synthetic fixture bootstrap 同样调用这些 application services，固定身份由本地或测试 profile 提供；真实来源权限必须由人工核实，不能从输入 CSV 中直接信任。
 
@@ -314,7 +317,7 @@ Python AI service 不直接访问业务数据库或 raw bucket。Python ingestio
 7. 查询 cache key 包含 catalog revision；未能确认 current revision 时从 MySQL 查询或返回受控错误。候选有效性还必须按当前时间检查 freshness / source expiry；cache TTL 不超过包含记录的最早有效期。最终推荐始终用 MySQL 核对当前可用版本，不依赖 cache freshness。
 8. 模型返回后，Java 在短 transaction 内锁定所涉 current pointers / Source 状态行或采用等价原子 CAS，再同时核对 MenuSnapshot、MenuItemRevision、OfferVersion、所选 options、来源用途与有效期；校验通过和 Recommendation completion 在同一原子边界保存。发布、来源撤回与最终校验使用一致锁顺序。相关版本或 hard facts 变化时返回 `DATA_CHANGED`，不能静默用旧价通过预算，也不自动重调付费 LLM。结果只代表 final commit 时的有效事实，后续读取仍检查撤回与过期。
 
-后续独立 worker 放在 `services/ingestion/`。将来启用 SQS 时按 at-least-once delivery 设计 worker：消息只携带 batch ID / object reference，重复消费不重复发布，超过重试阈值进入 DLQ，重放仍经过同一幂等边界。
+后续独立 worker 放在 `services/ingestion/`。将来启用异步任务队列（如数据库任务表、Redis Stream 或 RabbitMQ）时按 at-least-once delivery 设计 worker：消息只携带 batch ID / object reference，重复消费不重复发布，超过重试阈值进入死信记录，重放仍经过同一幂等边界。
 
 ## 9. 推荐证据与数据访问
 
@@ -350,7 +353,8 @@ Recommendation 保存 owner、request / conversation 引用、请求预算与 sc
 | 推荐生成期间涨价、撤回或来源过期 | Java 阻止旧版本成为最终结果 |
 | 菜单过期且 scheduler 尚未运行 | 查询时仍排除过期候选 |
 | 备份恢复与来源到期删除 | 恢复后重算有效性；不重新公开已撤销或到期内容 |
-| 同一 Cognito sub 并发首次登录 / 相同邮箱不同 subject | 前者创建一个 User；后者不凭 email 自动合并身份 |
+| 相同邮箱（含大小写变体）并发注册 / 同一邮箱验证码并发消费 | 仅创建一个 User 且验证码至多消费一次；重复提交返回冲突或无效验证码 |
+| 已轮换的旧 Refresh Token 被重放 / 密码重置后重放旧 Access Token | 重放旧 Refresh Token 立即撤销整个 `token_family_id`；密码重置更新 `token_valid_after` 使所有旧端即时失效 |
 | 用户 A 读取 / 取消 / 向用户 B 会话追加 | 404；不泄露内容或调用 provider |
 | 两个 tab 用同一 conversation version 发送不同输入 | 最多一个接受；其他返回并发 / version 错误，未接受草稿可恢复 |
 | 20 个相同 key 重试，含已消费 Turnstile token | 一个 request / dispatch；返回原状态，不重复扣 quota 或重复验证 token |
